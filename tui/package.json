@@ -1,0 +1,22 @@
+{
+  "name": "gemi-tui",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Gemi Engine V2 — debug TUI",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node build.mjs && node dist/app.mjs"
+  },
+  "dependencies": {
+    "ink": "^5.0.1",
+    "ink-text-input": "^6.0.0",
+    "react": "^18.2.0",
+    "term-mouse": "^0.2.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

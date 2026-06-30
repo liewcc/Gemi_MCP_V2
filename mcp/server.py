@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import subprocess
+import time
 from typing import Optional
 
 import httpx
@@ -29,6 +31,102 @@ async def _get(path: str, params: dict | None = None, timeout: float = 30.0) -> 
         return resp.json()
 
 
+def _classify_wait_result(result: dict) -> str:
+    """Translate raw engine wait_response dict into a human-readable status string."""
+    status = result.get("status", "unknown")
+    if status == "done":
+        refused = result.get("refused", False)
+        has_image = result.get("has_image", False)
+        text = result.get("text", "")
+        if refused:
+            flat = " ".join(text.replace("\n", " ").split())
+            return f"[refused] Gemini refused: {flat[:300]}"
+        if has_image and text:
+            return f"[success] Image generated.\n\n{text}"
+        if has_image:
+            return "[success] Image generated."
+        return f"[done] {text}" if text else "[done]"
+    message = result.get("message", "")
+    return f"[{status}] {message}" if message else f"[{status}]"
+
+
+async def _ensure_service():
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{ENGINE_URL}/health", timeout=2.0)
+            if resp.status_code == 200:
+                return
+    except Exception:
+        pass
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    engine_dir = os.path.join(repo_root, "Gemi_Engine_V2")
+    
+    if os.name == 'nt':
+        python_exe = os.path.join(engine_dir, ".venv", "Scripts", "python.exe")
+    else:
+        python_exe = os.path.join(engine_dir, ".venv", "bin", "python")
+        
+    if not os.path.exists(python_exe):
+        raise RuntimeError("Engine python executable not found")
+
+    out_log = open(os.path.join(engine_dir, "engine.log"), "a")
+    err_log = open(os.path.join(engine_dir, "engine_err.log"), "a")
+
+    kwargs = {}
+    if os.name == 'nt':
+        kwargs['creationflags'] = 0x08000000
+
+    subprocess.Popen(
+        [python_exe, "engine_service.py"],
+        cwd=engine_dir,
+        stdout=out_log,
+        stderr=err_log,
+        **kwargs
+    )
+
+    start_time = time.time()
+    while time.time() - start_time < 10:
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{ENGINE_URL}/health", timeout=0.5)
+                if resp.status_code == 200:
+                    return
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+
+    raise RuntimeError("Engine service failed to start within 10 seconds")
+
+
+async def _ensure_browser():
+    await _ensure_service()
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{ENGINE_URL}/health", timeout=2.0)
+            if resp.status_code == 200 and resp.json().get("engine_running"):
+                return
+    except Exception:
+        pass
+        
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{ENGINE_URL}/engine/start", 
+                json={"headless": True}, 
+                timeout=60.0
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") in ("success", "already_running"):
+                    return
+    except Exception:
+        pass
+
+    raise RuntimeError("Failed to start browser engine")
+
+
 # ── 1. Discover Capabilities ───────────────────────────────────────────────────
 
 @mcp.tool()
@@ -46,6 +144,7 @@ async def discover_capabilities(service: Optional[str] = None) -> str:
         JSON with available models, tools, sub_tools, thinking levels,
         current_model, and current_thinking_level.
     """.format(services=SERVICES)
+    await _ensure_browser()
     data = await _post("/browser/discover", params={"service": service} if service else None)
     if data.get("status") == "success":
         return json.dumps(data.get("data", {}), indent=2)
@@ -75,6 +174,7 @@ async def apply_settings(
         thinking_level: e.g. "Low", "Medium", "High", "Extended" (partial match ok).
         service:        Target service ({services}).
     """.format(services=SERVICES)
+    await _ensure_browser()
     data = await _post("/browser/apply_settings", {
         "model": model, "tool": tool,
         "sub_tool": sub_tool, "thinking_level": thinking_level,
@@ -104,6 +204,7 @@ async def attach_files(file_paths: list[str]) -> str:
     Returns:
         Summary: how many were added / removed.
     """
+    await _ensure_browser()
     # Sync via add/remove loop — engine exposes atomic add and remove endpoints
     current_data = await _get("/browser/current_attachments")
     current = set(current_data.get("attachments", []))
@@ -130,6 +231,7 @@ async def clear_attachments() -> str:
     Returns:
         Confirmation.
     """
+    await _ensure_browser()
     await _post("/browser/clear_attachments")
     return "All attachments cleared."
 
@@ -146,6 +248,7 @@ async def set_prompt(text: str) -> str:
     Args:
         text: The prompt text to type into the input field.
     """
+    await _ensure_browser()
     await _post("/browser/prompt", {"text": text})
     return f"Prompt staged ({len(text)} chars)."
 
@@ -181,6 +284,7 @@ async def submit_response(
     Returns:
         Generation status and summary when wait=True; "submitted" when wait=False.
     """.format(services=SERVICES)
+    await _ensure_browser()
     if prompt:
         await _post("/browser/prompt", {"text": prompt})
 
@@ -190,9 +294,7 @@ async def submit_response(
         return "Submitted. Call get_last_response() to poll for the result."
 
     result = await _post("/browser/wait_response", {"timeout": timeout}, timeout=timeout + 30.0)
-    status = result.get("status", "unknown")
-    message = result.get("message", "")
-    return f"[{status}] {message}" if message else f"[{status}]"
+    return _classify_wait_result(result)
 
 
 @mcp.tool()
@@ -208,6 +310,7 @@ async def get_last_response(service: Optional[str] = None) -> str:
     Returns:
         done=True/False and the current response text.
     """.format(services=SERVICES)
+    await _ensure_browser()
     data = await _get("/browser/last_response",
                       params={"service": service} if service else None)
     done = data.get("done", False)
@@ -236,6 +339,7 @@ async def send_chat(
         new_conversation: If True (default), start a fresh chat first.
         service:          Target service ({services}).
     """.format(services=SERVICES)
+    await _ensure_browser()
     if new_conversation:
         await _post("/browser/new_chat", params={"service": service} if service else None)
 
@@ -243,9 +347,9 @@ async def send_chat(
     await _post("/browser/submit")
 
     result = await _post("/browser/wait_response", {"timeout": 180}, timeout=210.0)
-    status = result.get("status", "unknown")
-    if status not in ("success", "done"):
-        raise RuntimeError(f"Chat failed [{status}]: {result.get('message', '')}")
+    classified = _classify_wait_result(result)
+    if classified.startswith("[error]") or classified.startswith("[timeout]") or classified.startswith("[reset]"):
+        raise RuntimeError(f"Chat failed: {classified}")
 
     data = await _get("/browser/last_response")
     return data.get("text", "")
@@ -272,6 +376,7 @@ async def download_images(
         start:    Starting counter number (default 1).
         service:  Target service ({services}).
     """.format(services=SERVICES)
+    await _ensure_browser()
     data = await _post("/browser/download", {
         "save_dir": save_dir,
         "prefix": prefix, "padding": padding, "start": start,
@@ -298,6 +403,7 @@ async def redo_response(service: Optional[str] = None) -> str:
     Args:
         service: Target service ({services}).
     """.format(services=SERVICES)
+    await _ensure_browser()
     data = await _post("/browser/redo", params={"service": service} if service else None)
     if data.get("status") == "success":
         return "Redo triggered. Poll get_last_response() or call wait_response."
@@ -316,6 +422,7 @@ async def new_chat(service: Optional[str] = None) -> str:
     Args:
         service: Target service ({services}).
     """.format(services=SERVICES)
+    await _ensure_browser()
     data = await _post("/browser/new_chat", params={"service": service} if service else None)
     if data.get("status") == "success":
         return "New chat started."
@@ -334,6 +441,7 @@ async def switch_service(service: str) -> str:
     Args:
         service: One of {services}.
     """.format(services=SERVICES)
+    await _ensure_browser()
     data = await _post("/browser/switch_service", {"service": service})
     if data.get("status") == "success":
         return f"Switched to: {service}. Verify by sending a test message."
@@ -360,6 +468,7 @@ async def switch_account(username: str) -> str:
     Returns:
         Confirmation with the username used.
     """
+    await _ensure_service()
     data = await _post("/engine/switch_account", {"username": username}, timeout=60.0)
     if data.get("status") == "success":
         return f"Account switched to: {data.get('username', username)}"
@@ -381,6 +490,7 @@ async def delete_history(range_name: str = "Last hour") -> str:
     Returns:
         Confirmation.
     """
+    await _ensure_browser()
     data = await _post("/browser/delete_history", {"range_name": range_name})
     if data.get("status") == "success":
         return f"History deleted: {range_name}"
@@ -388,6 +498,40 @@ async def delete_history(range_name: str = "Last hour") -> str:
 
 
 # ── 13. Engine Health ─────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def get_status() -> str:
+    """Get the detailed status of the engine service and browser.
+    Returns:
+        A formatted text block for AI decision-making.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{ENGINE_URL}/health", timeout=2.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                service = "online"
+                browser = "running" if data.get("engine_running") else "stopped"
+                provider = data.get("active_service", "gemini")
+                busy = "true" if data.get("busy") else "false"
+                queue_depth = str(data.get("queue_depth", 0))
+                return (
+                    f"Service: {service}\n"
+                    f"Browser: {browser}\n"
+                    f"Provider: {provider}\n"
+                    f"Busy: {busy}\n"
+                    f"Queue depth: {queue_depth}"
+                )
+    except Exception:
+        pass
+    return (
+        "Service: offline\n"
+        "Browser: stopped\n"
+        "Provider: gemini\n"
+        "Busy: false\n"
+        "Queue depth: 0"
+    )
+
 
 @mcp.tool()
 async def engine_status() -> str:
