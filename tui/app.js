@@ -572,12 +572,12 @@ const AccountsPane = React.memo(function AccountsPane({ profiles, selected, mode
   const bar       = scrollbar(total, innerRows, scrollOff);
 
   const nameWidth = Math.min(30, profiles.length > 0
-    ? Math.max(8, ...profiles.map(p => displayWidth(p.name || p.email || p.dir || '')))
-    : 8);
+    ? Math.max(12, ...profiles.map(p => displayWidth(p.name || p.email || p.dir || '')))
+    : 12);
 
   const textWidth = Math.max(20, width - 4 - (total > innerRows ? 1 : 0) - 1);
   const maxEmLen = Math.max(0, textWidth - 11 - nameWidth);
-  const headerRow = padEndDisplay(` ID     ${'A/C Name'.padEnd(Math.max(8, nameWidth - 8))}   A/C Email`, textWidth);
+  const headerRow = padEndDisplay(` ID     ${'Display Name'.padEnd(nameWidth)}   Email`, textWidth);
 
   return (
     <Box flexDirection="column" width={width} height={height} borderStyle="single"
