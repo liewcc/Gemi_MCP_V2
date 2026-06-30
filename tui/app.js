@@ -10,7 +10,8 @@ import fs from 'fs';
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR   = path.resolve(__dirname, '..', '..');
 const ENGINE_DIR = path.resolve(__dirname, '..', '..', 'Gemi_Engine_V2');
-const ENGINE_PY  = path.join(ENGINE_DIR, '.venv', 'Scripts', 'python.exe');
+const ENGINE_PY_CONSOLE  = path.join(ENGINE_DIR, '.venv', 'Scripts', 'python.exe');
+const ENGINE_PY_HIDDEN   = path.join(ENGINE_DIR, '.venv', 'Scripts', 'pythonw.exe');
 const CONFIG_PATH = path.join(ROOT_DIR, 'config.json');
 
 if (!fs.existsSync(CONFIG_PATH)) {
@@ -783,8 +784,11 @@ function App() {
         } else {
           // OFF→ON: spawn Python service only (no browser started)
           setStatusBar('Starting engine service…');
-          const proc = spawn(ENGINE_PY, ['engine_service.py'], {
-            cwd: ENGINE_DIR, detached: true, stdio: 'ignore', windowsHide: true,
+          const _cfg = (() => { try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { return {}; } })();
+          const _showConsole = !!_cfg.show_engine_console;
+          const _enginePy = _showConsole ? ENGINE_PY_CONSOLE : ENGINE_PY_HIDDEN;
+          const proc = spawn(_enginePy, ['engine_service.py'], {
+            cwd: ENGINE_DIR, detached: true, stdio: 'ignore', windowsHide: !_showConsole,
           });
           proc.unref();
           let up = false;

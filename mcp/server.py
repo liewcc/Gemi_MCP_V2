@@ -61,28 +61,30 @@ async def _ensure_service():
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     engine_dir = os.path.join(repo_root, "Gemi_Engine_V2")
-    
+
     if os.name == 'nt':
-        python_exe = os.path.join(engine_dir, ".venv", "Scripts", "python.exe")
+        cfg_path = os.path.join(repo_root, "config.json")
+        try:
+            import json as _json
+            show_console = _json.loads(open(cfg_path).read()).get("show_engine_console", False)
+        except Exception:
+            show_console = False
+        exe_name = "python.exe" if show_console else "pythonw.exe"
+        python_exe = os.path.join(engine_dir, ".venv", "Scripts", exe_name)
     else:
         python_exe = os.path.join(engine_dir, ".venv", "bin", "python")
-        
+
     if not os.path.exists(python_exe):
         raise RuntimeError("Engine python executable not found")
 
     out_log = open(os.path.join(engine_dir, "engine.log"), "a")
     err_log = open(os.path.join(engine_dir, "engine_err.log"), "a")
 
-    kwargs = {}
-    if os.name == 'nt':
-        kwargs['creationflags'] = 0x08000000
-
     subprocess.Popen(
         [python_exe, "engine_service.py"],
         cwd=engine_dir,
         stdout=out_log,
         stderr=err_log,
-        **kwargs
     )
 
     start_time = time.time()

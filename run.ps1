@@ -46,7 +46,14 @@ if (Test-Engine) {
 
     $logOut = Join-Path $engineDir "engine.log"
     $logErr = Join-Path $engineDir "engine_err.log"
-    $engineProc = Start-Process -FilePath $enginePy -ArgumentList "engine_service.py" -WorkingDirectory $engineDir -WindowStyle Hidden -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru
+    $cfgPath = Join-Path $root "config.json"
+    $showConsole = $false
+    if (Test-Path $cfgPath) {
+        try { $showConsole = (Get-Content $cfgPath -Raw | ConvertFrom-Json).show_engine_console -eq $true } catch {}
+    }
+    $engineExe  = if ($showConsole) { $enginePy } else { $enginePy -replace 'python\.exe$','pythonw.exe' }
+    $winStyle   = if ($showConsole) { 'Normal' } else { 'Hidden' }
+    $engineProc = Start-Process -FilePath $engineExe -ArgumentList "engine_service.py" -WorkingDirectory $engineDir -WindowStyle $winStyle -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru
     Write-Host "  Waiting for engine to come up..." -ForegroundColor Yellow
     $ready = $false
     foreach ($i in 1..20) {
