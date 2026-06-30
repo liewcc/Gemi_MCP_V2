@@ -665,8 +665,21 @@ function App() {
   const { isRawModeSupported } = useStdin();
   const { stdout }             = useStdout();
 
-  const termRows        = stdout?.rows ?? 24;
-  const termCols        = stdout?.columns ?? 80;
+  // Track terminal dimensions in state so any resize triggers a re-render.
+  // Reading stdout.rows/columns directly (without state) is a snapshot at mount
+  // time only — the log panel clips because React never re-renders on SIGWINCH.
+  const [termSize, setTermSize] = useState({
+    rows: stdout?.rows ?? 24,
+    cols: stdout?.columns ?? 80,
+  });
+  useEffect(() => {
+    if (!stdout) return;
+    const onResize = () => setTermSize({ rows: stdout.rows ?? 24, cols: stdout.columns ?? 80 });
+    stdout.on('resize', onResize);
+    return () => stdout.off('resize', onResize);
+  }, [stdout]);
+  const termRows        = termSize.rows;
+  const termCols        = termSize.cols;
   const mainHeight      = Math.max(8, termRows - 7);
   const leftPanelWidth  = 30; // Compact fixed width
   const rightPanelWidth = Math.max(20, termCols - leftPanelWidth);
