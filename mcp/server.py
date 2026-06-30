@@ -12,7 +12,7 @@ ENGINE_URL = os.environ.get("GEMI_ENGINE_URL", "http://127.0.0.1:18800")
 
 mcp = FastMCP("gemi-mcp-v2")
 
-SERVICES = "'gemini', 'deepseek', or 'copilot'"
+SERVICES = "'gemini', 'deepseek', 'copilot', or 'zai'"
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
