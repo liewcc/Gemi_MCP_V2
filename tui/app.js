@@ -572,8 +572,8 @@ const AccountsPane = React.memo(function AccountsPane({ profiles, selected, mode
   const bar       = scrollbar(total, innerRows, scrollOff);
 
   const nameWidth = Math.min(30, profiles.length > 0
-    ? Math.max(12, ...profiles.map(p => displayWidth(p.name || p.email || p.dir || '')))
-    : 12);
+    ? Math.max(8, ...profiles.map(p => displayWidth(p.name || p.email || p.dir || '')))
+    : 8);
 
   const textWidth = Math.max(20, width - 4 - (total > innerRows ? 1 : 0) - 1);
   const maxEmLen = Math.max(0, textWidth - 11 - nameWidth);
