@@ -1,4 +1,23 @@
-const ENGINE_URL = 'http://127.0.0.1:18800';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const configPath = path.resolve(__dirname, '../config.json');
+
+let port = 18900;
+try {
+  if (fs.existsSync(configPath)) {
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    if (config.port !== undefined) {
+      port = parseInt(config.port, 10);
+    }
+  }
+} catch (e) {
+  // fallback
+}
+
+const ENGINE_URL = `http://127.0.0.1:${port}`;
 
 async function _get(path, params = {}) {
   const url = new URL(`${ENGINE_URL}${path}`);

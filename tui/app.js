@@ -67,7 +67,7 @@ function clearChromeLocks() {
   } catch (e) {}
 }
 
-function tuiDeleteProfile(profileName) {
+async function tuiDeleteProfile(profileName) {
   const logFile = path.join(ROOT_DIR, 'tui_debug.log');
   try {
     fs.appendFileSync(logFile, `[tuiDeleteProfile] called with profileName: "${profileName}"\n`);
@@ -113,12 +113,13 @@ function tuiDeleteProfile(profileName) {
   writeLocalState(localState);
   try { fs.appendFileSync(logFile, `[tuiDeleteProfile] Local State written successfully\n`); } catch (e) {}
 
-  const cfg = readConfig();
+  const cfg = await engine.getConfig();
   if (cfg.active_profile === profileName) {
-    cfg.active_profile = null;
-    cfg.active_user = '';
     try { fs.appendFileSync(logFile, `[tuiDeleteProfile] updating config.json...\n`); } catch (e) {}
-    writeConfig(cfg);
+    await engine.saveConfig({
+      active_profile: null,
+      active_user: ''
+    });
     try { fs.appendFileSync(logFile, `[tuiDeleteProfile] config.json written\n`); } catch (e) {}
   }
 }
@@ -133,9 +134,84 @@ function tuiEditProfileName(profileName, newName) {
   }
 }
 
-function tuiRepackProfileIDs() {
+function tuiCleanupEmptyProfiles() {
+  const localState = readLocalState();
+  if (!localState.profile || !localState.profile.info_cache) return;
+
+  const infoCache = localState.profile.info_cache;
+  const toDelete = [];
+
+  for (const [d, info] of Object.entries(infoCache)) {
+    if (!d.startsWith('Profile ')) continue;
+    const email = (info.user_name || '').trim();
+    if (!email) {
+      toDelete.push(d);
+    }
+  }
+
+  if (toDelete.length === 0) return;
+
+  // Delete folders on disk
+  toDelete.forEach(profileName => {
+    const profilePath = path.join(DATA_DIR, profileName);
+    if (fs.existsSync(profilePath)) {
+      try {
+        fs.rmSync(profilePath, { recursive: true, force: true });
+      } catch (e) {}
+    }
+  });
+
+  // Update Local State
+  let modified = false;
+  if (localState.profile) {
+    const profile = localState.profile;
+    if (profile.info_cache) {
+      toDelete.forEach(p => {
+        if (profile.info_cache[p]) {
+          delete profile.info_cache[p];
+          modified = true;
+        }
+      });
+    }
+    if (profile.profiles_order) {
+      const origLen = profile.profiles_order.length;
+      profile.profiles_order = profile.profiles_order.filter(p => !toDelete.includes(p));
+      if (profile.profiles_order.length !== origLen) {
+        modified = true;
+      }
+    }
+    if (profile.last_active_profiles) {
+      const origLen = profile.last_active_profiles.length;
+      profile.last_active_profiles = profile.last_active_profiles.filter(p => !toDelete.includes(p));
+      if (profile.last_active_profiles.length !== origLen) {
+        modified = true;
+      }
+    }
+    if (toDelete.includes(profile.last_used)) {
+      profile.last_used = (profile.profiles_order && profile.profiles_order.length > 0) ? profile.profiles_order[0] : '';
+      modified = true;
+    }
+  }
+
+  if (localState.variations_google_groups) {
+    toDelete.forEach(p => {
+      if (localState.variations_google_groups[p]) {
+        delete localState.variations_google_groups[p];
+        modified = true;
+      }
+    });
+  }
+
+  if (modified) {
+    writeLocalState(localState);
+  }
+}
+
+async function tuiRepackProfileIDs() {
   clearChromeLocks();
   if (!fs.existsSync(DATA_DIR)) return;
+
+  tuiCleanupEmptyProfiles();
 
   const profileFolders = [];
   fs.readdirSync(DATA_DIR).forEach(d => {
@@ -252,17 +328,18 @@ function tuiRepackProfileIDs() {
 
   writeLocalState(localState);
 
-  const cfg = readConfig();
+  const cfg = await engine.getConfig();
   if (cfg.active_profile) {
     const active = cfg.active_profile;
     if (active.match(/^Profile \d+$/)) {
       if (renameMap[active]) {
-        cfg.active_profile = renameMap[active];
+        await engine.saveConfig({ active_profile: renameMap[active] });
       } else {
-        cfg.active_profile = null;
-        cfg.active_user = '';
+        await engine.saveConfig({
+          active_profile: null,
+          active_user: ''
+        });
       }
-      writeConfig(cfg);
     }
   }
 }
@@ -914,7 +991,7 @@ function App() {
     setMode('acct_actions');
   }, []);
 
-  const handleAcctAction = useCallback((action) => {
+  const handleAcctAction = useCallback(async (action) => {
     const browserRunning = browserStatusRef.current === 'online';
 
     if (action === 'Switch to Selected') {
@@ -926,7 +1003,7 @@ function App() {
       }
       try {
         setStatusBar('Repacking profiles...');
-        tuiRepackProfileIDs();
+        await tuiRepackProfileIDs();
         refreshProfiles();
         setStatusBar('Profiles repacked.');
       } catch (e) {
@@ -942,7 +1019,7 @@ function App() {
       const nm = p.name || p.email || p.dir;
       try {
         setStatusBar(`Deleting profile ${nm}...`);
-        tuiDeleteProfile(p.dir);
+        await tuiDeleteProfile(p.dir);
         refreshProfiles();
         setStatusBar(`Deleted ${nm}`);
       } catch (e) {
@@ -995,12 +1072,13 @@ function App() {
       // Chromium directly on browser_user_data/ (no sandbox), so:
       //   - Google login works (no --enable-automation flag)
       //   - All data (cookies, Local State) is written to the real Profile N directory
-      if (browserRunning) {
-        setStatusBar('ERROR: Close the browser before creating a new profile.');
-        return;
-      }
       (async () => {
         try {
+          if (browserRunning) {
+            setStatusBar('Stopping current browser...');
+            await engine.stop();
+            await new Promise(r => setTimeout(r, 1000));
+          }
           setStatusBar('Opening registration browser...');
           clearChromeLocks();
           const res = await engine.startRegistration();
@@ -1239,14 +1317,16 @@ function App() {
         const p = profilesRef.current[acctSelected];
         if (p) {
           const nm = p.name || p.email || p.dir;
-          try {
-            setStatusBar(`Deleting profile ${nm}...`);
-            tuiDeleteProfile(p.dir);
-            refreshProfiles();
-            setStatusBar(`Deleted ${nm}`);
-          } catch (e) {
-            setStatusBar(`ERROR: ${e.message}`);
-          }
+          (async () => {
+            try {
+              setStatusBar(`Deleting profile ${nm}...`);
+              await tuiDeleteProfile(p.dir);
+              refreshProfiles();
+              setStatusBar(`Deleted ${nm}`);
+            } catch (e) {
+              setStatusBar(`ERROR: ${e.message}`);
+            }
+          })();
         }
       }
       return;

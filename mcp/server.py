@@ -8,7 +8,20 @@ from typing import Optional
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-ENGINE_URL = os.environ.get("GEMI_ENGINE_URL", "http://127.0.0.1:18800")
+def _get_engine_port() -> int:
+    try:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cfg_path = os.path.join(repo_root, "config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.loads(f.read())
+                return int(cfg.get("port", 18900))
+    except Exception:
+        pass
+    return 18900
+
+ENGINE_PORT = _get_engine_port()
+ENGINE_URL = os.environ.get("GEMI_ENGINE_URL", f"http://127.0.0.1:{ENGINE_PORT}")
 
 mcp = FastMCP("gemi-mcp-v2")
 
@@ -544,6 +557,19 @@ async def engine_status() -> str:
     """
     data = await _get("/browser/status", timeout=10.0)
     return json.dumps(data, indent=2)
+
+
+@mcp.tool()
+async def get_browser_tabs() -> str:
+    """Get a list of all currently open tabs in the browser, their titles, URLs,
+    associated services, and which tab is currently active.
+
+    Returns:
+        JSON string containing the tabs list and the active service name.
+    """
+    await _ensure_service()
+    data = await _get("/browser/tabs", timeout=10.0)
+    return json.dumps(data, indent=2, ensure_ascii=False)
 
 
 # ── Entry Point ────────────────────────────────────────────────────────────────

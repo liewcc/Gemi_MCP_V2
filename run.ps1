@@ -7,9 +7,18 @@ if (-not (Test-Path "$nodeDir\node.exe")) {
     Read-Host "Press Enter to exit"; exit 1
 }
 
-# Ensure the engine service is running on :18800; start it if not.
+$cfgPath = Join-Path $root "config.json"
+$port = 18900
+if (Test-Path $cfgPath) {
+    try {
+        $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
+        if ($cfg.port -ne $null) { $port = [int]$cfg.port }
+    } catch {}
+}
+
+# Ensure the engine service is running on the configured port; start it if not.
 function Test-Engine {
-    try { Invoke-WebRequest -Uri "http://127.0.0.1:18800/health" -UseBasicParsing -TimeoutSec 2 | Out-Null; return $true }
+    try { Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 2 | Out-Null; return $true }
     catch { return $false }
 }
 
@@ -18,7 +27,7 @@ $enginePy  = Join-Path $engineDir ".venv\Scripts\python.exe"
 $engineProc = $null   # track PID only if we launched it
 
 if (Test-Engine) {
-    Write-Host "Engine service already running on :18800." -ForegroundColor Green
+    Write-Host "Engine service already running on :$port." -ForegroundColor Green
 } else {
     Write-Host "Engine service offline - starting it..." -ForegroundColor Yellow
     if (-not (Test-Path $enginePy)) {

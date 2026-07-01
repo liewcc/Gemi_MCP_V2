@@ -1,7 +1,22 @@
+import os
+import json
 import httpx
 
+def _get_engine_port() -> int:
+    try:
+        cfg_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "config.json"))
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                return int(cfg.get("port", 18900))
+    except Exception:
+        pass
+    return 18900
+
 class EngineClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:18800"):
+    def __init__(self, base_url: str = None):
+        if base_url is None:
+            base_url = f"http://127.0.0.1:{_get_engine_port()}"
         self.client = httpx.Client(base_url=base_url)
 
     def close(self):
