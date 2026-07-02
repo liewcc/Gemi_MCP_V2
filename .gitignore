@@ -9,3 +9,9 @@ tui/node_modules/
 tui/dist/
 node-portable.zip
 tui/.tui.lock
+
+# Local runtime state / logs (contains personal account info)
+config.json
+engine.log
+pythonw_out.txt
+tui_debug.log
