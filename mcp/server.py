@@ -379,6 +379,48 @@ async def get_last_response(service: Optional[str] = None) -> str:
     return f"done={done}\n\n{text}"
 
 
+@mcp.tool()
+async def get_artifact_code(service: Optional[str] = None) -> str:
+    """Read the full source code of an open z.ai code-artifact panel.
+
+    ZAI-SPECIFIC TOOL. z.ai (and only z.ai — no other service) opens a
+    right-side "artifact" preview panel when it generates a complete,
+    directly browser-runnable HTML document (a full <!DOCTYPE html> page).
+    The chat reply text in that case is just narration ("Here's the code...")
+    plus a small trigger card — the actual generated HTML/CSS/JS is NOT in
+    the chat text and get_last_response() will not return it. This tool
+    reads it directly from the artifact panel's live iframe instead.
+
+    For every other kind of code response (Python, plain JS functions,
+    React/JSX components, or any language/snippet that isn't a complete
+    standalone webpage), z.ai does NOT open this panel — the full code is
+    already inline in the normal chat text, so just use get_last_response()
+    as usual. Calling this tool in that case returns status="unsupported".
+
+    Typical flow: submit_response(...) or send_chat(...) on service="zai" →
+    if you suspect the reply generated a runnable HTML page (or just want to
+    check), call get_artifact_code() → if status="success", `code` is the
+    complete HTML document source ready to save to a .html file.
+
+    Args:
+        service: Target service. Must be "zai" — other services will return
+                 status="unsupported" since they don't have this UI feature.
+
+    Returns:
+        status: "success" (code contains the full HTML source),
+                "none" (zai is active but no artifact panel is currently open),
+                or "unsupported" (active service isn't zai).
+    """
+    await _ensure_browser()
+    data = await _get("/browser/artifact_code",
+                      params={"service": service} if service else None)
+    status = data.get("status", "none")
+    code = data.get("code")
+    if status == "success" and code:
+        return f"status=success\n\n{code}"
+    return f"status={status}\n\n(No artifact code available.)"
+
+
 # ── 6. High-level Chat (combinator) ───────────────────────────────────────────
 
 @mcp.tool()
