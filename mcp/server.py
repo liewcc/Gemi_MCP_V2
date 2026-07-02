@@ -2,11 +2,16 @@ import asyncio
 import json
 import os
 import subprocess
+import sys
 import time
 from typing import Optional
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
+from shared.health_parser import record_event, get_metrics  # noqa: E402
 
 def _get_engine_port() -> int:
     try:
@@ -26,6 +31,10 @@ ENGINE_URL = os.environ.get("GEMI_ENGINE_URL", f"http://127.0.0.1:{ENGINE_PORT}"
 mcp = FastMCP("gemi-mcp-v2")
 
 SERVICES = "'gemini', 'deepseek', 'copilot', or 'zai'"
+
+# Guards concurrent tool calls within this process from each independently
+# seeing the engine down and Popen-ing a duplicate instance.
+_service_start_lock = asyncio.Lock()
 
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
@@ -63,47 +72,75 @@ def _classify_wait_result(result: dict) -> str:
     return f"[{status}] {message}" if message else f"[{status}]"
 
 
-async def _ensure_service():
+def _record_health(service: Optional[str], classified: str, response_time: float) -> None:
+    """Best-effort log of a completed generation for shared/health_parser.py metrics."""
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{ENGINE_URL}/health", timeout=2.0)
-            if resp.status_code == 200:
-                return
+        cfg_path = os.path.join(_REPO_ROOT, "config.json")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            file_cfg = json.loads(f.read())
+    except Exception:
+        file_cfg = {}
+
+    provider = service or file_cfg.get("active_service") or "unknown"
+    account = file_cfg.get("active_user") or "unknown"
+
+    if classified.startswith("[refused]"):
+        status, reason = "refused", classified
+    elif classified.startswith("[timeout]"):
+        status, reason = "timeout", None
+    elif classified.startswith("[error]") or classified.startswith("[reset]"):
+        status, reason = "error", classified
+    else:
+        status, reason = "success", None
+
+    try:
+        record_event(provider, account, status, response_time, refusal_reason=reason)
     except Exception:
         pass
 
-    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    engine_dir = os.path.join(repo_root, "Gemi_Engine_V2")
 
-    if os.name == 'nt':
-        exe_name = "pythonw.exe"
-        python_exe = os.path.join(engine_dir, ".venv", "Scripts", exe_name)
-    else:
-        python_exe = os.path.join(engine_dir, ".venv", "bin", "python")
-
-    if not os.path.exists(python_exe):
-        raise RuntimeError("Engine python executable not found")
-
-    out_log = open(os.path.join(engine_dir, "engine.log"), "a")
-    err_log = open(os.path.join(engine_dir, "engine_err.log"), "a")
-
-    subprocess.Popen(
-        [python_exe, "engine_service.py"],
-        cwd=engine_dir,
-        stdout=out_log,
-        stderr=err_log,
-    )
-
-    start_time = time.time()
-    while time.time() - start_time < 10:
+async def _ensure_service():
+    async with _service_start_lock:
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{ENGINE_URL}/health", timeout=0.5)
+                resp = await client.get(f"{ENGINE_URL}/health", timeout=2.0)
                 if resp.status_code == 200:
                     return
         except Exception:
             pass
-        await asyncio.sleep(0.5)
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        engine_dir = os.path.join(repo_root, "Gemi_Engine_V2")
+
+        if os.name == 'nt':
+            exe_name = "pythonw.exe"
+            python_exe = os.path.join(engine_dir, ".venv", "Scripts", exe_name)
+        else:
+            python_exe = os.path.join(engine_dir, ".venv", "bin", "python")
+
+        if not os.path.exists(python_exe):
+            raise RuntimeError("Engine python executable not found")
+
+        out_log = open(os.path.join(engine_dir, "engine.log"), "a")
+        err_log = open(os.path.join(engine_dir, "engine_err.log"), "a")
+
+        subprocess.Popen(
+            [python_exe, "engine_service.py"],
+            cwd=engine_dir,
+            stdout=out_log,
+            stderr=err_log,
+        )
+
+        start_time = time.time()
+        while time.time() - start_time < 10:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"{ENGINE_URL}/health", timeout=0.5)
+                    if resp.status_code == 200:
+                        return
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
 
     raise RuntimeError("Engine service failed to start within 10 seconds")
 
@@ -314,8 +351,11 @@ async def submit_response(
     if not wait:
         return "Submitted. Call get_last_response() to poll for the result."
 
+    started = time.monotonic()
     result = await _post("/browser/wait_response", {"timeout": timeout}, timeout=timeout + 30.0)
-    return _classify_wait_result(result)
+    classified = _classify_wait_result(result)
+    _record_health(service, classified, time.monotonic() - started)
+    return classified
 
 
 @mcp.tool()
@@ -367,8 +407,10 @@ async def send_chat(
     await _post("/browser/prompt", {"text": prompt})
     await _post("/browser/submit")
 
+    started = time.monotonic()
     result = await _post("/browser/wait_response", {"timeout": 180}, timeout=210.0)
     classified = _classify_wait_result(result)
+    _record_health(service, classified, time.monotonic() - started)
     if classified.startswith("[error]") or classified.startswith("[timeout]") or classified.startswith("[reset]"):
         raise RuntimeError(f"Chat failed: {classified}")
 
@@ -563,6 +605,32 @@ async def engine_status() -> str:
     """
     data = await _get("/browser/status", timeout=10.0)
     return json.dumps(data, indent=2)
+
+
+@mcp.tool()
+async def get_health_metrics(provider: Optional[str] = None) -> str:
+    """Get success/refusal/timeout rates and average latency from logged generations.
+
+    Backed by shared/health_parser.py's session_health.jsonl log, written on every
+    submit_response / send_chat completion. Use this to judge whether the current
+    account/provider is getting rate-limited or refusing more than usual.
+
+    Args:
+        provider: Filter to one provider ({services}). Omit for stats across all.
+
+    Returns:
+        Formatted text block with total_attempts, success_rate, refusal_rate,
+        timeout_rate, and average_response_time (seconds).
+    """.format(services=SERVICES)
+    m = get_metrics(provider)
+    return (
+        f"Provider: {provider or 'all'}\n"
+        f"Total attempts: {m['total_attempts']}\n"
+        f"Success rate: {m['success_rate']:.1%}\n"
+        f"Refusal rate: {m['refusal_rate']:.1%}\n"
+        f"Timeout rate: {m['timeout_rate']:.1%}\n"
+        f"Avg response time: {m['average_response_time']:.1f}s"
+    )
 
 
 @mcp.tool()
