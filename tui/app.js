@@ -12,6 +12,7 @@ const ROOT_DIR   = path.resolve(__dirname, '..', '..');
 const ENGINE_DIR = path.resolve(__dirname, '..', '..', 'Gemi_Engine_V2');
 const ENGINE_PY_HIDDEN   = path.join(ENGINE_DIR, '.venv', 'Scripts', 'pythonw.exe');
 const CONFIG_PATH = path.join(ROOT_DIR, 'config.json');
+const DOM_DUMPS_DIR = path.join(ENGINE_DIR, 'dom_dumps');
 
 if (!fs.existsSync(CONFIG_PATH)) {
   const defaultCfg = {
@@ -66,7 +67,7 @@ function clearChromeLocks() {
   } catch (e) {}
 }
 
-async function tuiDeleteProfile(profileName) {
+async function tuiDeleteProfile(profileName, reassignTo = null) {
   const logFile = path.join(ROOT_DIR, 'tui_debug.log');
   try {
     fs.appendFileSync(logFile, `[tuiDeleteProfile] called with profileName: "${profileName}"\n`);
@@ -115,10 +116,9 @@ async function tuiDeleteProfile(profileName) {
   const cfg = await engine.getConfig();
   if (cfg.active_profile === profileName) {
     try { fs.appendFileSync(logFile, `[tuiDeleteProfile] updating config.json...\n`); } catch (e) {}
-    await engine.saveConfig({
-      active_profile: null,
-      active_user: ''
-    });
+    await engine.saveConfig(reassignTo
+      ? { active_profile: reassignTo.dir, active_user: reassignTo.email || '' }
+      : { active_profile: null, active_user: '' });
     try { fs.appendFileSync(logFile, `[tuiDeleteProfile] config.json written\n`); } catch (e) {}
   }
 }
@@ -364,6 +364,15 @@ const GROUPS = [
       { id: 'submit',    label: 'Submit',   type: 'action' },
       { id: 'discover',  label: 'Discover', type: 'action' },
     ]
+  },
+  {
+    id: 'dom_debug',
+    label: 'DOM Debug',
+    items: [
+      { id: 'capture_dom', label: 'Capture DOM (c)', type: 'toggle' },
+      { id: 'screenshot',  label: 'Screenshot',       type: 'action' },
+      { id: 'click',       label: 'Click (x,y)',      type: 'input'  },
+    ]
   }
 ];
 
@@ -484,6 +493,8 @@ const Header = React.memo(function Header({ engineStatus, browserStatus, activeA
   );
 });
 
+const TABS = ['dashboard', 'account', 'health'];
+
 const MenuBar = React.memo(function MenuBar({ activeTab, mode }) {
   const isMenu = mode === 'menu';
   return (
@@ -504,6 +515,14 @@ const MenuBar = React.memo(function MenuBar({ activeTab, mode }) {
         {' ACCOUNT '}
       </Text>
       <Text>  </Text>
+      <Text
+        color={activeTab === 'health' ? (isMenu ? 'black' : 'cyan') : 'gray'}
+        backgroundColor={isMenu && activeTab === 'health' ? 'cyan' : undefined}
+        bold={!isMenu && activeTab === 'health'}
+      >
+        {' HEALTH '}
+      </Text>
+      <Text>  </Text>
       {isMenu && <Text dimColor>(← → switch)</Text>}
     </Box>
   );
@@ -511,8 +530,9 @@ const MenuBar = React.memo(function MenuBar({ activeTab, mode }) {
 
 const Controls = React.memo(function Controls({
   selected, mode, height,
-  engineStatus, browserOn, headlessOn, autoLaunchOn,
-  width, visibleList
+  engineStatus, browserOn, headlessOn, autoLaunchOn, domCaptureOn,
+  width, visibleList,
+  clickInputActive, clickInputValue, onClickInputChange, onClickInputSubmit
 }) {
   const actionsActive = mode === 'actions';
   const engineOn = engineStatus !== 'offline';
@@ -523,7 +543,22 @@ const Controls = React.memo(function Controls({
 
   return (
     <Box flexDirection="column" width={width} height={height} borderStyle="single"
-         borderColor={actionsActive ? 'cyan' : undefined} paddingX={1} flexShrink={0}>
+         borderColor={actionsActive || clickInputActive ? 'cyan' : undefined} paddingX={1} flexShrink={0}>
+      {clickInputActive ? (
+        <Box flexDirection="column">
+          <Text>Click at (x,y):</Text>
+          <Box borderStyle="round" borderColor="cyan" paddingX={1}>
+            <TextInput
+              value={clickInputValue}
+              onChange={onClickInputChange}
+              onSubmit={onClickInputSubmit}
+              focus={true}
+            />
+          </Box>
+          <Text dimColor>Format: x,y — e.g. 640,480</Text>
+          <Text dimColor>Press Esc to cancel</Text>
+        </Box>
+      ) : (
       <Box flexDirection="column">
         {visibleList.map((entry, i) => {
           const isSelected = i === selected;
@@ -555,6 +590,7 @@ const Controls = React.memo(function Controls({
                         : entry.id === 'browser'     ? browserOn
                         : entry.id === 'headless'    ? headlessOn
                         : entry.id === 'auto_launch' ? autoLaunchOn
+                        : entry.id === 'capture_dom' ? domCaptureOn
                         : null;
           const labelText = ('  ' + entry.label).padEnd(LABEL_W);
           const badgeText = entry.type === 'toggle'
@@ -581,6 +617,7 @@ const Controls = React.memo(function Controls({
           );
         })}
       </Box>
+      )}
     </Box>
   );
 });
@@ -639,7 +676,7 @@ const RegistrationModal = React.memo(function RegistrationModal({ stage, targetP
   return (
     <Box flexDirection="column" width={MODAL_WIDTH + 4} borderStyle="single" paddingX={1} borderColor="yellow">
       {stage === 'pending' && (
-        <Text>{padEndDisplay(`Browser launched for ${targetProfile} — please sign in via the browser, then close it.`, MODAL_WIDTH)}</Text>
+        <Text>{padEndDisplay(`Browser launched for ${targetProfile || 'a new account'} — please sign in via the browser, then close it.`, MODAL_WIDTH)}</Text>
       )}
       {stage === 'success' && (
         <>
@@ -818,6 +855,10 @@ function App() {
   const [mode, setMode]                 = useState('menu');
   const [acctInputMsg, setAcctInputMsg] = useState('');
   const [acctInputValue, setAcctInputValue] = useState('');
+  const [domCaptureArmed, setDomCaptureArmed] = useState(false);
+  const [domClickValue, setDomClickValue] = useState('');
+  const domCaptureArmedRef = useRef(false);
+  useEffect(() => { domCaptureArmedRef.current = domCaptureArmed; }, [domCaptureArmed]);
   const [regModalStage, setRegModalStage] = useState(null);
   const [regTargetProfile, setRegTargetProfile] = useState(null);
   const [repackConfirmSelected, setRepackConfirmSelected] = useState(0); // 0 = Cancel, 1 = OK — default to Cancel for safety
@@ -873,14 +914,44 @@ function App() {
 
   // ── Actions ──────────────────────────────────────────────────────────────────
 
+  // DOM Debug: capture_dom writes the active tab's full HTML straight to disk
+  // (the response never has to fit inside an MCP/LLM context — this is a plain
+  // Node HTTP call, so the TUI just writes whatever size comes back).
+  const doDomCapture = useCallback(async () => {
+    try {
+      fs.mkdirSync(DOM_DUMPS_DIR, { recursive: true });
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const service = activeServiceRef.current || 'unknown';
+      setStatusBar('Capturing DOM…');
+      const data = await engine.captureDom();
+      const full = path.join(DOM_DUMPS_DIR, `${service}_${ts}.html`);
+      fs.writeFileSync(full, data.dom ?? '', 'utf8');
+      setStatusBar(`DOM captured: ${full}`);
+    } catch (e) {
+      setStatusBar(`Capture failed: ${e.message}`);
+    }
+  }, []);
+
+  // Screenshot is written server-side by the engine (cwd = ENGINE_DIR), so the
+  // path passed over the wire is relative to that, not to the TUI process.
+  const doScreenshot = useCallback(async () => {
+    fs.mkdirSync(DOM_DUMPS_DIR, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const service = activeServiceRef.current || 'unknown';
+    const relPath = `dom_dumps/${service}_${ts}.png`;
+    await engine.screenshot(relPath);
+    return { path: path.join(ENGINE_DIR, relPath) };
+  }, []);
+
   const runAction = useCallback(async (actionId) => {
     setStatusBar(`Running: ${actionId}…`);
     try {
       let result;
       switch (actionId) {
-        case 'new_chat': result = await engine.newChat(); break;
-        case 'submit':   result = await engine.submit(); break;
-        case 'discover': result = await engine.discover(); break;
+        case 'new_chat':    result = await engine.newChat(); break;
+        case 'submit':      result = await engine.submit(); break;
+        case 'discover':    result = await engine.discover(); break;
+        case 'screenshot':  result = await doScreenshot(); break;
       }
       setStatusBar(`${actionId} → ${JSON.stringify(result).slice(0, 120)}`);
     } catch (e) {
@@ -962,6 +1033,11 @@ function App() {
         autoLaunchRef.current = next;
         setStatusBar(`Auto-launch Browser: ${next ? 'ON' : 'OFF'}`);
         try { await engine.saveConfig({ auto_launch: next }); } catch {}
+      } else if (id === 'capture_dom') {
+        const next = !domCaptureArmedRef.current;
+        setDomCaptureArmed(next);
+        domCaptureArmedRef.current = next;
+        setStatusBar(next ? 'DOM capture armed — press c to snapshot.' : 'DOM capture disarmed.');
       }
     } catch (e) {
       setStatusBar(`ERROR: ${e.message}`);
@@ -1031,6 +1107,12 @@ function App() {
     setMode('acct_actions');
   }, []);
 
+  const handleDomClickSubmit = useCallback((val) => {
+    if (inputSubmitRef.current) inputSubmitRef.current(val);
+    setDomClickValue('');
+    setMode('actions');
+  }, []);
+
   const handleAcctAction = useCallback(async (action) => {
     const browserRunning = browserStatusRef.current === 'online';
 
@@ -1050,32 +1132,40 @@ function App() {
         setStatusBar(`ERROR: ${e.message}`);
       }
     } else if (action === 'Delete Profile') {
-      if (browserRunning) {
-        setStatusBar('ERROR: Close the browser before deleting profiles.');
-        return;
-      }
       const p = profilesRef.current[acctSelected];
       if (!p) return;
       const nm = p.name || p.email || p.dir;
       try {
+        if (browserRunning) {
+          setStatusBar('Stopping browser before deleting profile...');
+          await engine.stop();
+          clearChromeLocks();
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        const list = profilesRef.current;
+        const remaining = list.filter((_, i) => i !== acctSelected);
+        const reassignTo = remaining.length > 0 ? remaining[acctSelected % remaining.length] : null;
         setStatusBar(`Deleting profile ${nm}...`);
-        await tuiDeleteProfile(p.dir);
+        await tuiDeleteProfile(p.dir, reassignTo);
         refreshProfiles();
-        setStatusBar(`Deleted ${nm}`);
+        setStatusBar(reassignTo
+          ? `Deleted ${nm}. Active account switched to ${reassignTo.name || reassignTo.email || reassignTo.dir}. Start the browser manually when ready.`
+          : `Deleted ${nm}. No accounts left. Start the browser manually when ready.`);
       } catch (e) {
         setStatusBar(`ERROR: ${e.message}`);
       }
     } else if (action === 'Rebuild Profile') {
       // Rebuild = open unsandboxed headed browser on the selected profile for re-login.
       // Uses start_registration which writes directly to browser_user_data/ (no sandbox).
-      if (browserRunning) {
-        setStatusBar('ERROR: Close the browser before rebuilding profiles.');
-        return;
-      }
       const p = profilesRef.current[acctSelected];
       if (!p) return;
       (async () => {
         try {
+          if (browserRunning) {
+            setStatusBar('Stopping browser before rebuild...');
+            await engine.stop();
+            await new Promise(r => setTimeout(r, 1000));
+          }
           setStatusBar(`Opening browser for re-login on ${p.name || p.dir}...`);
           clearChromeLocks();
           await engine.saveConfig({ active_profile: p.dir, active_user: p.email || '' });
@@ -1088,31 +1178,39 @@ function App() {
         }
       })();
     } else if (action === 'Edit Display Name') {
-      if (browserRunning) {
-        setStatusBar('ERROR: Close the browser before editing profiles.');
-        return;
-      }
       const p = profilesRef.current[acctSelected];
       if (!p) return;
-      setAcctInputMsg('Edit Display Name:');
-      setAcctInputValue(p.name || '');
-      inputSubmitRef.current = (val) => {
+      (async () => {
         try {
-          setStatusBar('Editing profile name...');
-          tuiEditProfileName(p.dir, val);
-          refreshProfiles();
-          setStatusBar('Name updated');
+          if (browserRunning) {
+            setStatusBar('Stopping browser before editing profile...');
+            await engine.stop();
+            clearChromeLocks();
+            await new Promise(r => setTimeout(r, 1000));
+          }
+          setAcctInputMsg('Edit Display Name:');
+          setAcctInputValue(p.name || '');
+          inputSubmitRef.current = (val) => {
+            try {
+              setStatusBar('Editing profile name...');
+              tuiEditProfileName(p.dir, val);
+              refreshProfiles();
+              setStatusBar('Name updated. Start the browser manually when ready.');
+            } catch (e) {
+              setStatusBar(`ERROR: ${e.message}`);
+            }
+          };
+          setMode('acct_input');
         } catch (e) {
           setStatusBar(`ERROR: ${e.message}`);
         }
-      };
-      setMode('acct_input');
+      })();
     } else if (action === 'Create New Profile') {
-      // Create = open a separate unsandboxed headed browser on the next available Profile N.
-      // The engine's start_registration() handles profile slot selection and launches
-      // Chromium directly on browser_user_data/ (no sandbox), so:
-      //   - Google login works (no --enable-automation flag)
-      //   - All data (cookies, Local State) is written to the real Profile N directory
+      // Create = open a headed browser in an isolated staging directory (never the
+      // real browser_user_data/) so it can't collide with any other Chrome instance's
+      // singleton lock. The engine only assigns the real Profile N slot and moves the
+      // data into place once the browser is closed and a real login was detected —
+      // regTargetProfile stays null until then (see the poll effect below).
       (async () => {
         try {
           if (browserRunning) {
@@ -1122,9 +1220,8 @@ function App() {
           }
           setStatusBar('Opening registration browser...');
           clearChromeLocks();
-          const res = await engine.startRegistration();
-          const profileName = res?.profile || 'new profile';
-          setRegTargetProfile(profileName);
+          await engine.startRegistration();
+          setRegTargetProfile(null);
           setRegModalStage('pending');
           setMode('registration_modal');
         } catch (e) {
@@ -1135,12 +1232,6 @@ function App() {
   }, [acctSelected, doSwitchAccount, refreshProfiles]);
 
 
-  // ── Register TUI PID ─────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    engine.registerTui(process.pid).catch(() => {});
-  }, []);
-
   // ── Registration Modal Poll ────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -1150,11 +1241,24 @@ function App() {
           const h = await engine.health();
           if (!h.registration_active) {
             clearInterval(interval);
-            const profs = await engine.getProfiles();
-            if (profs.some(p => p.dir === regTargetProfile)) {
-              setRegModalStage('success');
+            if (regTargetProfile) {
+              // Rebuild Profile: target slot was already known — unchanged check.
+              const profs = await engine.getProfiles();
+              if (profs.some(p => p.dir === regTargetProfile)) {
+                setRegModalStage('success');
+              } else {
+                setRegModalStage('failed');
+              }
             } else {
-              setRegModalStage('failed');
+              // Create New Profile: real slot (if any) was only just decided by the
+              // engine at commit time — read the outcome instead of guessing a name.
+              const r = h.last_registration_result;
+              if (r?.status === 'success' && r.profile) {
+                setRegTargetProfile(r.profile);
+                setRegModalStage('success');
+              } else {
+                setRegModalStage('failed');
+              }
             }
             refreshProfiles();
           }
@@ -1178,6 +1282,12 @@ function App() {
         setBrowserPids(bPids); browserPidsRef.current = bPids;
         setBusy(h.busy ?? false);
         setQueueDepth(h.queue_depth ?? 0);
+        // Re-register on every tick, not just on mount — a fresh engine
+        // process (idle-timeout self-exit, crash, manual restart) has no
+        // memory of a one-time registration made against its predecessor,
+        // which would silently break idle-timeout's "is a TUI attached?"
+        // check for the rest of that engine instance's life.
+        if (h.service_pid) engine.registerTui(process.pid).catch(() => {});
       } catch {
         setEngineStatus('offline');
         setBrowserStatus('offline');
@@ -1299,7 +1409,23 @@ function App() {
       return; // let TextInput handle all other keys
     }
 
+    // ── dom_click_input: TextInput owns all keys except Esc/Tab ──────────────
+    if (mode === 'dom_click_input') {
+      if (key.escape || key.tab) {
+        setDomClickValue('');
+        setMode('actions');
+        setStatusBar('Canceled');
+      }
+      return; // let TextInput handle all other keys
+    }
 
+    // ── DOM capture hotkey — fires from any mode once armed, as long as no ──
+    // text-input mode above already claimed this keystroke (they all `return`
+    // before reaching here).
+    if (char === 'c' && domCaptureArmedRef.current) {
+      doDomCapture();
+      return;
+    }
 
     // ── Tab / Esc: context-aware back navigation ─────────────────────────────
     if (key.tab || key.escape) {
@@ -1331,10 +1457,14 @@ function App() {
     // ── Menu bar ─────────────────────────────────────────────────────────────
     if (mode === 'menu') {
       if (key.leftArrow || key.rightArrow) {
-        setActiveTab(prev => prev === 'dashboard' ? 'account' : 'dashboard');
+        setActiveTab(prev => {
+          const i = TABS.indexOf(prev);
+          const step = key.rightArrow ? 1 : -1;
+          return TABS[(i + step + TABS.length) % TABS.length];
+        });
       }
       if (key.return || key.downArrow) {
-        setMode(activeTab === 'dashboard' ? 'actions' : 'acct_actions');
+        setMode(activeTab === 'dashboard' ? 'actions' : activeTab === 'account' ? 'acct_actions' : 'health_view');
       }
       return;
     }
@@ -1393,6 +1523,18 @@ function App() {
         } else if (entry?.kind === 'item') {
           if (entry.type === 'toggle') toggleDashItem(entry.id);
           else if (entry.type === 'action') runAction(entry.id);
+          else if (entry.type === 'input' && entry.id === 'click') {
+            setDomClickValue('');
+            inputSubmitRef.current = (val) => {
+              const m = val.trim().match(/^(\d+)\s*,\s*(\d+)$/);
+              if (!m) { setStatusBar('Invalid format — use "x,y", e.g. 640,480'); return; }
+              const [, x, y] = m;
+              engine.click(Number(x), Number(y))
+                .then(() => setStatusBar(`Clicked (${x}, ${y})`))
+                .catch(e => setStatusBar(`Click failed: ${e.message}`));
+            };
+            setMode('dom_click_input');
+          }
         }
       }
       return;
@@ -1420,25 +1562,40 @@ function App() {
     if (mode === 'acct_actions') {
       if (key.upArrow)   setAcctActionSelected(s => Math.max(0, s - 1));
       if (key.downArrow) setAcctActionSelected(s => Math.min(ACCT_ACTIONS.length - 1, s + 1));
+      const action = ACCT_ACTIONS[acctActionSelected];
+      // Enter only ever confirms/runs — it never moves focus to the account list.
+      // Moving focus right is exclusively rightArrow's job (see below).
       if (key.return) {
-        const action = ACCT_ACTIONS[acctActionSelected];
-        if (ACCT_ACTIONS_NEED_TARGET.includes(action)) {
-          setPendingAction(action);
-          setMode('account_list');
-          setStatusBar(`Select an account for: ${action}`);
-        } else if (action === 'Repack Profile IDs') {
+        if (action === 'Repack Profile IDs') {
           setRepackConfirmSelected(0);
           setMode('repack_confirm');
+        } else if (ACCT_ACTIONS_NEED_TARGET.includes(action)) {
+          setStatusBar(`Press → to choose an account for: ${action}`);
         } else {
           handleAcctAction(action);
         }
       }
-      if (key.rightArrow) setMode('account_list'); // → moves focus to right panel
+      // Right arrow: move focus to the account list. For actions that need a
+      // target account, also arm pendingAction so Enter over there knows what to run.
+      if (key.rightArrow) {
+        if (ACCT_ACTIONS_NEED_TARGET.includes(action)) {
+          setPendingAction(action);
+          setStatusBar(`Select an account for: ${action}`);
+        }
+        setMode('account_list');
+      }
       return;
     }
 
     // ── Account right panel (account_list) ───────────────────────────────────
     if (mode === 'account_list') {
+      // Left arrow: same as Tab/Esc — back to the left panel, landing on
+      // whatever action was last highlighted there (acctActionSelected persists).
+      if (key.leftArrow) {
+        setMode('acct_actions');
+        setPendingAction(null);
+        return;
+      }
       if (key.upArrow)   setAcctSelected(s => Math.max(0, s - 1));
       if (key.downArrow) setAcctSelected(s => Math.min(profiles.length - 1, s + 1));
       if (key.return) {
@@ -1449,27 +1606,10 @@ function App() {
           doSwitchAccount(acctSelected);
         }
       }
-      
-      // Hotkey: Delete to instantly delete profile
+
+      // Hotkey: Delete to instantly delete the highlighted profile.
       if (key.delete) {
-        if (browserStatusRef.current === 'online') {
-          setStatusBar('ERROR: Close the browser before deleting profiles.');
-          return;
-        }
-        const p = profilesRef.current[acctSelected];
-        if (p) {
-          const nm = p.name || p.email || p.dir;
-          (async () => {
-            try {
-              setStatusBar(`Deleting profile ${nm}...`);
-              await tuiDeleteProfile(p.dir);
-              refreshProfiles();
-              setStatusBar(`Deleted ${nm}`);
-            } catch (e) {
-              setStatusBar(`ERROR: ${e.message}`);
-            }
-          })();
-        }
+        handleAcctAction('Delete Profile');
       }
       return;
     }
@@ -1494,8 +1634,13 @@ function App() {
               browserOn={browserStatus === 'online'}
               headlessOn={headlessMode}
               autoLaunchOn={autoLaunch}
+              domCaptureOn={domCaptureArmed}
               width={leftPanelWidth}
               visibleList={buildVisibleList(expandedGroups)}
+              clickInputActive={mode === 'dom_click_input'}
+              clickInputValue={domClickValue}
+              onClickInputChange={setDomClickValue}
+              onClickInputSubmit={handleDomClickSubmit}
             />
             <LogPanel
               logs={logs}
@@ -1505,7 +1650,7 @@ function App() {
               width={rightPanelWidth}
             />
           </>
-        ) : (
+        ) : activeTab === 'account' ? (
           <Box flexDirection="column" width={leftPanelWidth + rightPanelWidth} height={mainHeight}>
             {mode === 'registration_modal' ? (
               <RegistrationModal stage={regModalStage} targetProfile={regTargetProfile} />
@@ -1532,6 +1677,10 @@ function App() {
                 />
               </Box>
             )}
+          </Box>
+        ) : (
+          <Box width={leftPanelWidth + rightPanelWidth} height={mainHeight} alignItems="center" justifyContent="center">
+            <Text dimColor>Health — not yet implemented</Text>
           </Box>
         )}
       </Box>

@@ -59,4 +59,7 @@ export const engine = {
   saveConfig:         (updates)       => _post('/engine/config', updates),
   startRegistration:  (profileName)  => _post('/engine/start_registration', profileName ? { profile_name: profileName } : {}),
   stopRegistration:   ()              => _post('/engine/stop_registration'),
+  captureDom:      ()              => _post('/browser/capture_dom'),
+  screenshot:      (relPath)       => _get('/browser/screenshot', { path: relPath }),
+  click:           (x, y)          => _get('/browser/click', { x, y }),
 };
