@@ -7,7 +7,7 @@ if (-not (Test-Path "$nodeDir\node.exe")) {
     Read-Host "Press Enter to exit"; exit 1
 }
 
-$cfgPath = Join-Path $root "config.json"
+$cfgPath = Join-Path $root "engine_config.json"
 $port = 18900
 if (Test-Path $cfgPath) {
     try {
@@ -55,13 +55,8 @@ if (Test-Engine) {
 
     $logOut = Join-Path $engineDir "engine.log"
     $logErr = Join-Path $engineDir "engine_err.log"
-    $cfgPath = Join-Path $root "config.json"
-    $showConsole = $false
-    if (Test-Path $cfgPath) {
-        try { $showConsole = (Get-Content $cfgPath -Raw | ConvertFrom-Json).show_engine_console -eq $true } catch {}
-    }
-    $engineExe  = if ($showConsole) { $enginePy } else { $enginePy -replace 'python\.exe$','pythonw.exe' }
-    $winStyle   = if ($showConsole) { 'Normal' } else { 'Hidden' }
+    $engineExe  = $enginePy -replace 'python\.exe$','pythonw.exe'
+    $winStyle   = 'Hidden'
     $engineProc = Start-Process -FilePath $engineExe -ArgumentList "engine_service.py" -WorkingDirectory $engineDir -WindowStyle $winStyle -RedirectStandardOutput $logOut -RedirectStandardError $logErr -PassThru
     Write-Host "  Waiting for engine to come up..." -ForegroundColor Yellow
     $ready = $false

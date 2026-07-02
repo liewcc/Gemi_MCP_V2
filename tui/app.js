@@ -10,7 +10,6 @@ import fs from 'fs';
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR   = path.resolve(__dirname, '..', '..');
 const ENGINE_DIR = path.resolve(__dirname, '..', '..', 'Gemi_Engine_V2');
-const ENGINE_PY_CONSOLE  = path.join(ENGINE_DIR, '.venv', 'Scripts', 'python.exe');
 const ENGINE_PY_HIDDEN   = path.join(ENGINE_DIR, '.venv', 'Scripts', 'pythonw.exe');
 const CONFIG_PATH = path.join(ROOT_DIR, 'config.json');
 
@@ -793,11 +792,14 @@ function App() {
   const [browserPids, setBrowserPids]   = useState([]);
   const [headlessMode, setHeadlessMode] = useState(true);  // loaded from config
   const [autoLaunch, setAutoLaunch]     = useState(false);  // loaded from config
+  const [activeServiceMode, setActiveServiceMode] = useState('gemini');
   const [expandedGroups, setExpandedGroups] = useState(new Set()); // collapsed by default
   const servicePidRef  = useRef(null);
   const browserPidsRef = useRef([]);
   const headlessModeRef = useRef(true);
   const autoLaunchRef   = useRef(false);
+  const activeServiceRef = useRef('gemini');
+  const activeAccountRef = useRef('');
   const engineStatusRef = useRef('offline');
   const browserStatusRef = useRef('offline');
   const autoLaunchedRef = useRef(false);
@@ -861,11 +863,10 @@ function App() {
         } else {
           // OFF→ON: spawn Python service only (no browser started)
           setStatusBar('Starting engine service…');
-          const _cfg = (() => { try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { return {}; } })();
-          const _showConsole = !!_cfg.show_engine_console;
-          const _enginePy = _showConsole ? ENGINE_PY_CONSOLE : ENGINE_PY_HIDDEN;
-          const proc = spawn(_enginePy, ['engine_service.py'], {
-            cwd: ENGINE_DIR, detached: true, stdio: 'ignore', windowsHide: !_showConsole,
+          const outFd = fs.openSync(path.join(ENGINE_DIR, 'engine.log'), 'a');
+          const errFd = fs.openSync(path.join(ENGINE_DIR, 'engine_err.log'), 'a');
+          const proc = spawn(ENGINE_PY_HIDDEN, ['engine_service.py'], {
+            cwd: ENGINE_DIR, detached: true, stdio: ['ignore', outFd, errFd], windowsHide: true,
           });
           proc.unref();
           let up = false;
@@ -884,7 +885,7 @@ function App() {
               setStatusBar('Auto-launching browser…');
               try {
                 const hl = headlessModeRef.current;
-                await engine.start(hl);
+                await engine.start(hl, activeAccountRef.current || null, activeServiceRef.current || null);
                 setStatusBar('Engine started & Browser auto-launched.');
               } catch (e) {
                 setStatusBar(`Engine started, but Browser auto-launch failed: ${e.message}`);
@@ -906,7 +907,7 @@ function App() {
           // OFF→ON: start browser with current headless setting
           const hl = headlessModeRef.current;
           setStatusBar(`Starting browser (${hl ? 'headless' : 'headed'})…`);
-          await engine.start(hl);
+          await engine.start(hl, activeAccountRef.current || null, activeServiceRef.current || null);
           setStatusBar('Browser started.');
         }
       } else if (id === 'headless') {
@@ -977,7 +978,7 @@ function App() {
 
       // 6. Start browser with the target profile
       const hl = headlessModeRef.current;
-      await engine.start(hl);
+      await engine.start(hl, target, activeServiceRef.current || null);
 
       setStatusBar(`Switched to ${target}`);
     } catch (e) {
@@ -1138,7 +1139,14 @@ function App() {
           return lines;
         });
         const cfg = await engine.getConfig();
-        if (cfg?.active_user != null) setActiveAccount(cfg.active_user || '');
+        if (cfg?.active_user != null) {
+          setActiveAccount(cfg.active_user || '');
+          activeAccountRef.current = cfg.active_user || '';
+        }
+        if (cfg?.active_service !== undefined && cfg.active_service !== activeServiceRef.current) {
+          setActiveServiceMode(cfg.active_service || 'gemini');
+          activeServiceRef.current = cfg.active_service || 'gemini';
+        }
         if (cfg?.headless !== undefined && cfg.headless !== headlessModeRef.current) {
           setHeadlessMode(!!cfg.headless);
           headlessModeRef.current = !!cfg.headless;
@@ -1152,7 +1160,7 @@ function App() {
           autoLaunchedRef.current = true;
           if (engineStatusRef.current === 'online' && browserStatusRef.current === 'offline') {
             setStatusBar('Auto-launching browser…');
-            engine.start(!!cfg.headless)
+            engine.start(!!cfg.headless, cfg.active_user || null, cfg.active_service || null)
               .then(() => setStatusBar('Browser auto-launched.'))
               .catch(e => setStatusBar(`Auto-launch failed: ${e.message}`));
           }

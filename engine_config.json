@@ -1,0 +1,5 @@
+{
+  "port": 18900,
+  "idle_timeout_minutes": 15,
+  "idle_timeout_enabled": true
+}

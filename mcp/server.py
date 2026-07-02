@@ -11,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 def _get_engine_port() -> int:
     try:
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        cfg_path = os.path.join(repo_root, "config.json")
+        cfg_path = os.path.join(repo_root, "engine_config.json")
         if os.path.exists(cfg_path):
             with open(cfg_path, "r", encoding="utf-8") as f:
                 cfg = json.loads(f.read())
@@ -76,13 +76,7 @@ async def _ensure_service():
     engine_dir = os.path.join(repo_root, "Gemi_Engine_V2")
 
     if os.name == 'nt':
-        cfg_path = os.path.join(repo_root, "config.json")
-        try:
-            import json as _json
-            show_console = _json.loads(open(cfg_path).read()).get("show_engine_console", False)
-        except Exception:
-            show_console = False
-        exe_name = "python.exe" if show_console else "pythonw.exe"
+        exe_name = "pythonw.exe"
         python_exe = os.path.join(engine_dir, ".venv", "Scripts", exe_name)
     else:
         python_exe = os.path.join(engine_dir, ".venv", "bin", "python")
@@ -125,11 +119,23 @@ async def _ensure_browser():
     except Exception:
         pass
         
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg_path = os.path.join(repo_root, "config.json")
+    active_user = None
+    active_service = None
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            file_cfg = json.loads(f.read())
+            active_user = file_cfg.get("active_user") or None
+            active_service = file_cfg.get("active_service") or None
+    except Exception:
+        pass
+
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{ENGINE_URL}/engine/start", 
-                json={"headless": True}, 
+                f"{ENGINE_URL}/engine/start",
+                json={"headless": True, "active_user": active_user, "active_service": active_service},
                 timeout=60.0
             )
             if resp.status_code == 200:

@@ -3,12 +3,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const configPath = path.resolve(__dirname, '../config.json');
+const engineConfigPath = path.resolve(__dirname, '../engine_config.json');
 
 let port = 18900;
 try {
-  if (fs.existsSync(configPath)) {
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  if (fs.existsSync(engineConfigPath)) {
+    const config = JSON.parse(fs.readFileSync(engineConfigPath, 'utf8'));
     if (config.port !== undefined) {
       port = parseInt(config.port, 10);
     }
@@ -40,7 +40,7 @@ async function _post(path, body = {}) {
 
 export const engine = {
   health:          ()              => _get('/health'),
-  start:           (headless=true) => _post('/engine/start', { headless }),
+  start:           (headless=true, activeUser=null, activeService=null) => _post('/engine/start', { headless, active_user: activeUser, active_service: activeService }),
   stop:            ()              => _post('/engine/stop'),
   getLogs:         (lines=80)      => _get('/engine/logs', { lines }).then(d => d.logs ?? []),
   getConfig:       ()              => _get('/engine/config'),
