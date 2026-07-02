@@ -390,6 +390,7 @@ const ACCT_ACTIONS = [
   'Create New Profile',
   'Repack Profile IDs'
 ];
+const ACCT_ACTIONS_NEED_TARGET = ['Switch to Selected', 'Edit Display Name', 'Delete Profile', 'Rebuild Profile'];
 
 // LEFT_PANEL_WIDTH and LEFT_PANEL_PAD are calculated dynamically inside the App component to support flexible sizing.
 
@@ -403,6 +404,7 @@ function displayWidth(str) {
     if (
       (cp >= 0x1100  && cp <= 0x115F)  || // Hangul Jamo
       (cp >= 0x2E80  && cp <= 0x303F)  || // CJK Radicals
+      (cp >= 0x25A0  && cp <= 0x25FF)  || // Geometric Shapes
       (cp >= 0x3040  && cp <= 0x33FF)  || // Japanese
       (cp >= 0x3400  && cp <= 0x4DBF)  || // CJK Extension A
       (cp >= 0x4E00  && cp <= 0x9FFF)  || // CJK Unified
@@ -528,15 +530,15 @@ const Controls = React.memo(function Controls({
 
           if (entry.kind === 'group') {
             // ── Group header row: same structure as item rows to prevent wrapping ──
-            const arrow     = entry.expanded ? 'v ' : '> ';
-            const labelText = (arrow + entry.label).padEnd(LABEL_W);
+            const arrow     = entry.expanded ? '▼ ' : '▶ ';
+            const labelText = padEndDisplay(arrow + entry.label, LABEL_W);
             return (
               <Box key={entry.id} flexDirection="row" width={ROW_W}>
                 <Box width={LABEL_W}>
                   <Text
                     color={isSelected ? (actionsActive ? 'black' : 'cyan') : 'white'}
                     backgroundColor={actionsActive && isSelected ? 'cyan' : undefined}
-                    bold
+                    bold={!(isSelected && actionsActive)}
                   >
                     {labelText}
                   </Text>
@@ -587,7 +589,6 @@ const AccountActions = React.memo(function AccountActions({
   selectedAction,
   mode,
   height,
-  confirmMsg,
   inputMsg,
   inputValue,
   onInputChange,
@@ -595,20 +596,12 @@ const AccountActions = React.memo(function AccountActions({
   width
 }) {
   const active = mode === 'acct_actions';
-  const confirmActive = mode === 'acct_confirm';
   const inputActive = mode === 'acct_input';
 
   return (
     <Box flexDirection="column" width={width} height={height} borderStyle="single"
-         borderColor={active || confirmActive || inputActive ? 'cyan' : undefined} paddingX={1} flexShrink={0}>
-      <Text bold underline>Account Setting {active ? '◀' : ''}</Text>
-      
-      {confirmActive ? (
-        <Box flexDirection="column">
-          <Text>{confirmMsg}</Text>
-          <Text>[y] Confirm  [n] Cancel</Text>
-        </Box>
-      ) : inputActive ? (
+         borderColor={active || inputActive ? 'cyan' : undefined} paddingX={1} flexShrink={0}>
+      {inputActive ? (
         <Box flexDirection="column">
           <Text>{inputMsg}</Text>
           <Box borderStyle="round" borderColor="cyan" paddingX={1}>
@@ -640,6 +633,46 @@ const AccountActions = React.memo(function AccountActions({
   );
 });
 
+const MODAL_WIDTH = 60; // interior text width, excludes border/paddingX
+
+const RegistrationModal = React.memo(function RegistrationModal({ stage, targetProfile }) {
+  return (
+    <Box flexDirection="column" width={MODAL_WIDTH + 4} borderStyle="single" paddingX={1} borderColor="yellow">
+      {stage === 'pending' && (
+        <Text>{padEndDisplay(`Browser launched for ${targetProfile} — please sign in via the browser, then close it.`, MODAL_WIDTH)}</Text>
+      )}
+      {stage === 'success' && (
+        <>
+          <Text>{padEndDisplay(`Registration complete for ${targetProfile}.`, MODAL_WIDTH)}</Text>
+          <Text>{padEndDisplay('[Enter] OK', MODAL_WIDTH)}</Text>
+        </>
+      )}
+      {stage === 'failed' && (
+        <>
+          <Text>{padEndDisplay('Registration failed — browser was closed before signing in.', MODAL_WIDTH)}</Text>
+          <Text>{padEndDisplay('[Enter] OK', MODAL_WIDTH)}</Text>
+        </>
+      )}
+    </Box>
+  );
+});
+
+const RepackConfirmModal = React.memo(function RepackConfirmModal({ selected }) {
+  return (
+    <Box flexDirection="column" width={MODAL_WIDTH + 4} borderStyle="single" borderColor="yellow" paddingX={1}>
+      <Text>{padEndDisplay('Repack all profile IDs? This renumbers profile folders and cannot be undone.', MODAL_WIDTH)}</Text>
+      <Box marginTop={1}>
+        <Text backgroundColor={selected === 0 ? 'cyan' : undefined} color={selected === 0 ? 'black' : undefined}> Cancel </Text>
+        <Text>   </Text>
+        <Text backgroundColor={selected === 1 ? 'cyan' : undefined} color={selected === 1 ? 'black' : undefined}> OK </Text>
+        <Text>{' '.repeat(Math.max(0, MODAL_WIDTH - 20))}</Text>
+      </Box>
+    </Box>
+  );
+});
+
+
+
 const AccountsPane = React.memo(function AccountsPane({ profiles, selected, mode, height, width }) {
   const active    = mode === 'account_list';
   const innerRows = Math.max(1, height - 6);
@@ -659,7 +692,7 @@ const AccountsPane = React.memo(function AccountsPane({ profiles, selected, mode
   return (
     <Box flexDirection="column" width={width} height={height} borderStyle="single"
          borderColor={active ? 'cyan' : undefined} paddingX={1} flexShrink={0}>
-      <Text bold underline>Account List {active ? '◀' : ''} <Text dimColor>({total})</Text></Text>
+      <Text bold underline>{active ? '▶ ' : '  '}Account List <Text dimColor>({total})</Text></Text>
       <Box marginTop={1} flexDirection="row">
         <Box flexDirection="column" flexGrow={1}>
           <Text color="white" backgroundColor="blue">{headerRow}</Text>
@@ -707,7 +740,7 @@ const LogPanel = React.memo(function LogPanel({ logs, scrollOffset, mode, height
   return (
     <Box flexDirection="column" width={width} height={height} borderStyle="single"
          borderColor={active ? 'cyan' : undefined} paddingX={1} flexShrink={0}>
-      <Text bold underline>Engine Log {active ? '◀' : ''} <Text dimColor>({logs.length} lines)</Text></Text>
+      <Text bold underline>{active ? '▶ ' : '  '}Engine Log <Text dimColor>({logs.length} lines)</Text></Text>
       <Box marginTop={1} flexDirection="row">
         <Box flexDirection="column" flexGrow={1}>
           {visible.map((line, i) => (
@@ -778,14 +811,16 @@ function App() {
   }, []);
   const [selected, setSelected]         = useState(0);
   const [acctSelected, setAcctSelected] = useState(0);
+  const [acctActionSelected, setAcctActionSelected] = useState(0);
   const [input, setInput]               = useState('');
   
   const [activeTab, setActiveTab]       = useState('dashboard');
   const [mode, setMode]                 = useState('menu');
-  const [acctActionSelected, setAcctActionSelected] = useState(0);
-  const [acctConfirmMsg, setAcctConfirmMsg] = useState('');
   const [acctInputMsg, setAcctInputMsg] = useState('');
   const [acctInputValue, setAcctInputValue] = useState('');
+  const [regModalStage, setRegModalStage] = useState(null);
+  const [regTargetProfile, setRegTargetProfile] = useState(null);
+  const [repackConfirmSelected, setRepackConfirmSelected] = useState(0); // 0 = Cancel, 1 = OK — default to Cancel for safety
 
   const [statusBar, setStatusBar]       = useState('Ready.');
   const [servicePid, setServicePid]     = useState(null);
@@ -811,18 +846,21 @@ function App() {
   const logsRef         = useRef(logs);
   const profilesRef     = useRef(profiles);
   const acctSelectedRef = useRef(acctSelected);
+  const acctActionSelectedRef = useRef(acctActionSelected);
   const inputSubmitRef   = useRef(null);
   const modeRef = useRef(mode);
   const pendingActionRef = useRef(pendingAction);
   const activeTabRef = useRef(activeTab);
   const expandedGroupsRef = useRef(expandedGroups);
   const selectedRef = useRef(selected);
-  const acctActionSelectedRef = useRef(acctActionSelected);
+  const regModalStageRef = useRef(regModalStage);
+  const repackConfirmSelectedRef = useRef(repackConfirmSelected);
 
   useEffect(() => { mainHeightRef.current = mainHeight; }, [mainHeight]);
   useEffect(() => { logsRef.current = logs; }, [logs]);
   useEffect(() => { profilesRef.current = profiles; }, [profiles]);
   useEffect(() => { acctSelectedRef.current = acctSelected; }, [acctSelected]);
+  useEffect(() => { acctActionSelectedRef.current = acctActionSelected; }, [acctActionSelected]);
   useEffect(() => { engineStatusRef.current = engineStatus; }, [engineStatus]);
   useEffect(() => { browserStatusRef.current = browserStatus; }, [browserStatus]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
@@ -830,7 +868,8 @@ function App() {
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
   useEffect(() => { expandedGroupsRef.current = expandedGroups; }, [expandedGroups]);
   useEffect(() => { selectedRef.current = selected; }, [selected]);
-  useEffect(() => { acctActionSelectedRef.current = acctActionSelected; }, [acctActionSelected]);
+  useEffect(() => { regModalStageRef.current = regModalStage; }, [regModalStage]);
+  useEffect(() => { repackConfirmSelectedRef.current = repackConfirmSelected; }, [repackConfirmSelected]);
 
   // ── Actions ──────────────────────────────────────────────────────────────────
 
@@ -1041,8 +1080,9 @@ function App() {
           clearChromeLocks();
           await engine.saveConfig({ active_profile: p.dir, active_user: p.email || '' });
           await engine.startRegistration(p.dir);
-          setStatusBar(`Browser open - please sign in for ${p.name || p.dir}. Close browser when done.`);
-          refreshProfiles();
+          setRegTargetProfile(p.dir);
+          setRegModalStage('pending');
+          setMode('registration_modal');
         } catch (e) {
           setStatusBar(`ERROR: ${e.message}`);
         }
@@ -1084,8 +1124,9 @@ function App() {
           clearChromeLocks();
           const res = await engine.startRegistration();
           const profileName = res?.profile || 'new profile';
-          setStatusBar(`Browser open on ${profileName} - please sign in to Google. Close browser when done.`);
-          refreshProfiles();
+          setRegTargetProfile(profileName);
+          setRegModalStage('pending');
+          setMode('registration_modal');
         } catch (e) {
           setStatusBar(`ERROR: ${e.message}`);
         }
@@ -1099,6 +1140,29 @@ function App() {
   useEffect(() => {
     engine.registerTui(process.pid).catch(() => {});
   }, []);
+
+  // ── Registration Modal Poll ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (regModalStage === 'pending') {
+      const interval = setInterval(async () => {
+        try {
+          const h = await engine.health();
+          if (!h.registration_active) {
+            clearInterval(interval);
+            const profs = await engine.getProfiles();
+            if (profs.some(p => p.dir === regTargetProfile)) {
+              setRegModalStage('success');
+            } else {
+              setRegModalStage('failed');
+            }
+            refreshProfiles();
+          }
+        } catch (e) {}
+      }, 1500);
+      return () => clearInterval(interval);
+    }
+  }, [regModalStage, regTargetProfile, refreshProfiles]);
 
   // ── Poll health ───────────────────────────────────────────────────────────────
 
@@ -1186,13 +1250,42 @@ function App() {
     const activeTab = activeTabRef.current;
     const expandedGroups = expandedGroupsRef.current;
     const selected = selectedRef.current;
-    const acctActionSelected = acctActionSelectedRef.current;
     const acctSelected = acctSelectedRef.current;
+    const acctActionSelected = acctActionSelectedRef.current;
+    const pendingAction = pendingActionRef.current;
+    const regModalStage = regModalStageRef.current;
+    const repackConfirmSelected = repackConfirmSelectedRef.current;
     const profiles = profilesRef.current;
     const logs = logsRef.current;
 
     if (key.ctrl && char === 'c') {
       engine.stop().catch(() => {}).finally(() => exit());
+      return;
+    }
+
+    if (mode === 'registration_modal') {
+      if (regModalStage !== 'pending' && (key.return || char)) {
+        setMode('account_list');
+        setRegModalStage(null);
+        setRegTargetProfile(null);
+      }
+      return;
+    }
+
+    if (mode === 'repack_confirm') {
+      if (key.leftArrow || key.rightArrow) {
+        setRepackConfirmSelected(s => (s === 0 ? 1 : 0));
+      }
+      if (key.escape || key.tab) {
+        setMode('acct_actions');
+        return;
+      }
+      if (key.return) {
+        if (repackConfirmSelected === 1) {
+          handleAcctAction('Repack Profile IDs');
+        }
+        setMode('acct_actions');
+      }
       return;
     }
 
@@ -1211,13 +1304,24 @@ function App() {
     // ── Tab / Esc: context-aware back navigation ─────────────────────────────
     if (key.tab || key.escape) {
       if (mode === 'log') {
-        // right panel → back to left panel
         setMode('actions');
       } else if (mode === 'account_list') {
-        // right panel → back to left panel
         setMode('acct_actions');
+        setPendingAction(null);
+      } else if (mode === 'actions') {
+        const vl    = buildVisibleList(expandedGroups);
+        const entry = vl[selected];
+        if (entry?.kind === 'item') {
+          const gid  = entry.groupId;
+          const newVl = buildVisibleList(new Set([...expandedGroups].filter(id => id !== gid)));
+          const gIdx  = newVl.findIndex(e => e.kind === 'group' && e.id === gid);
+          setExpandedGroups(prev => { const n = new Set(prev); n.delete(gid); return n; });
+          setSelected(gIdx >= 0 ? gIdx : 0);
+        } else {
+          setMode('menu');
+          setStatusBar('Returned to menu');
+        }
       } else {
-        // left panel or menu → back to menu
         setMode('menu');
         setStatusBar('Returned to menu');
       }
@@ -1241,7 +1345,17 @@ function App() {
       const entry = vl[selected];
 
       if (key.upArrow)   setSelected(s => Math.max(0, s - 1));
-      if (key.downArrow) setSelected(s => Math.min(vl.length - 1, s + 1));
+      if (key.downArrow) {
+        if (entry?.kind === 'item') {
+          const next = vl[selected + 1];
+          if (next && next.kind === 'item') {
+            setSelected(s => s + 1);
+          }
+          // else: already at the last item of this group — stay put, don't spill into the next level-0 group
+        } else {
+          setSelected(s => Math.min(vl.length - 1, s + 1));
+        }
+      }
 
       // Right arrow: expand group OR move to log panel (on item)
       if (key.rightArrow) {
@@ -1262,9 +1376,8 @@ function App() {
           }
         } else if (entry?.kind === 'item') {
           const gid    = entry.groupId;
-          const newVl  = buildVisibleList(new Set([...expandedGroups].filter(id => id !== gid)));
+          const newVl  = buildVisibleList(expandedGroups); // group stays expanded — do not collapse it
           const gIdx   = newVl.findIndex(e => e.kind === 'group' && e.id === gid);
-          setExpandedGroups(prev => { const n = new Set(prev); n.delete(gid); return n; });
           setSelected(gIdx >= 0 ? gIdx : 0);
         }
       }
@@ -1301,11 +1414,25 @@ function App() {
       return;
     }
 
+
+
     // ── Account left panel (acct_actions) ────────────────────────────────────
     if (mode === 'acct_actions') {
       if (key.upArrow)   setAcctActionSelected(s => Math.max(0, s - 1));
       if (key.downArrow) setAcctActionSelected(s => Math.min(ACCT_ACTIONS.length - 1, s + 1));
-      if (key.return)    handleAcctAction(ACCT_ACTIONS[acctActionSelected]);
+      if (key.return) {
+        const action = ACCT_ACTIONS[acctActionSelected];
+        if (ACCT_ACTIONS_NEED_TARGET.includes(action)) {
+          setPendingAction(action);
+          setMode('account_list');
+          setStatusBar(`Select an account for: ${action}`);
+        } else if (action === 'Repack Profile IDs') {
+          setRepackConfirmSelected(0);
+          setMode('repack_confirm');
+        } else {
+          handleAcctAction(action);
+        }
+      }
       if (key.rightArrow) setMode('account_list'); // → moves focus to right panel
       return;
     }
@@ -1314,7 +1441,14 @@ function App() {
     if (mode === 'account_list') {
       if (key.upArrow)   setAcctSelected(s => Math.max(0, s - 1));
       if (key.downArrow) setAcctSelected(s => Math.min(profiles.length - 1, s + 1));
-      if (key.return)    doSwitchAccount(acctSelected);
+      if (key.return) {
+        if (pendingAction) {
+          handleAcctAction(pendingAction);
+          setPendingAction(null);
+        } else {
+          doSwitchAccount(acctSelected);
+        }
+      }
       
       // Hotkey: Delete to instantly delete profile
       if (key.delete) {
@@ -1372,26 +1506,33 @@ function App() {
             />
           </>
         ) : (
-          <>
-            <AccountActions
-              selectedAction={acctActionSelected}
-              mode={mode}
-              height={mainHeight}
-              confirmMsg={acctConfirmMsg}
-              inputMsg={acctInputMsg}
-              inputValue={acctInputValue}
-              onInputChange={setAcctInputValue}
-              onInputSubmit={handleAcctInputSubmit}
-              width={leftPanelWidth}
-            />
-            <AccountsPane
-              profiles={profiles}
-              selected={acctSelected}
-              mode={mode}
-              height={mainHeight}
-              width={rightPanelWidth}
-            />
-          </>
+          <Box flexDirection="column" width={leftPanelWidth + rightPanelWidth} height={mainHeight}>
+            {mode === 'registration_modal' ? (
+              <RegistrationModal stage={regModalStage} targetProfile={regTargetProfile} />
+            ) : mode === 'repack_confirm' ? (
+              <RepackConfirmModal selected={repackConfirmSelected} />
+            ) : (
+              <Box flexDirection="row" width={leftPanelWidth + rightPanelWidth} height={mainHeight}>
+                <AccountActions
+                  selectedAction={acctActionSelected}
+                  mode={mode}
+                  height={mainHeight}
+                  inputMsg={acctInputMsg}
+                  inputValue={acctInputValue}
+                  onInputChange={setAcctInputValue}
+                  onInputSubmit={handleAcctInputSubmit}
+                  width={leftPanelWidth}
+                />
+                <AccountsPane
+                  profiles={profiles}
+                  selected={acctSelected}
+                  mode={mode}
+                  height={mainHeight}
+                  width={rightPanelWidth}
+                />
+              </Box>
+            )}
+          </Box>
         )}
       </Box>
       <StatusBar message={statusBar} />

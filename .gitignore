@@ -8,3 +8,4 @@ __pycache__/
 tui/node_modules/
 tui/dist/
 node-portable.zip
+tui/.tui.lock
