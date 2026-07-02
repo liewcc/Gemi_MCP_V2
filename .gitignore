@@ -18,3 +18,7 @@ tui_debug.log
 
 # Internal session notes, not for the public repo
 HANDOFF.md
+API_REFERENCE.md
+ARCHITECTURE.md
+MCP_TOOLS_REFERENCE.md
+MODULARIZATION_PLAN.md
