@@ -15,6 +15,7 @@ config.json
 engine.log
 pythonw_out.txt
 tui_debug.log
+Gemi_Engine_V2/dom_dumps/
 
 # Internal session notes, not for the public repo
 HANDOFF.md
