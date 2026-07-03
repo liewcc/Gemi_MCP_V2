@@ -99,7 +99,36 @@ def _record_health(service: Optional[str], classified: str, response_time: float
         pass
 
 
+def _kill_stale_port_holder() -> None:
+    """Kill any leftover process bound to ENGINE_PORT.
+
+    A prior engine crash/forced-kill can leave the listening socket in a
+    state where new uvicorn instances fail to bind (WinError 10048) while
+    the health check to it also fails, deadlocking _ensure_service.
+    """
+    if os.name != 'nt':
+        return
+    try:
+        out = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True, timeout=5
+        ).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[0] == "TCP" and f":{ENGINE_PORT}" in parts[1] and "LISTENING" in line:
+                pid = parts[-1]
+                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+# Handle of a child engine_service.py this process has already spawned.
+# Retried _ensure_service calls (e.g. after a slow cold start) must wait on
+# this instead of Popen-ing yet another instance and colliding on the port.
+_engine_proc: Optional[subprocess.Popen] = None
+
+
 async def _ensure_service():
+    global _engine_proc
     async with _service_start_lock:
         try:
             async with httpx.AsyncClient() as client:
@@ -109,30 +138,37 @@ async def _ensure_service():
         except Exception:
             pass
 
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        engine_dir = os.path.join(repo_root, "Gemi_Engine_V2")
+        if _engine_proc is None or _engine_proc.poll() is not None:
+            _kill_stale_port_holder()
 
-        if os.name == 'nt':
-            exe_name = "pythonw.exe"
-            python_exe = os.path.join(engine_dir, ".venv", "Scripts", exe_name)
-        else:
-            python_exe = os.path.join(engine_dir, ".venv", "bin", "python")
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            engine_dir = os.path.join(repo_root, "Gemi_Engine_V2")
 
-        if not os.path.exists(python_exe):
-            raise RuntimeError("Engine python executable not found")
+            if os.name == 'nt':
+                exe_name = "pythonw.exe"
+                python_exe = os.path.join(engine_dir, ".venv", "Scripts", exe_name)
+            else:
+                python_exe = os.path.join(engine_dir, ".venv", "bin", "python")
 
-        out_log = open(os.path.join(engine_dir, "engine.log"), "a")
-        err_log = open(os.path.join(engine_dir, "engine_err.log"), "a")
+            if not os.path.exists(python_exe):
+                raise RuntimeError("Engine python executable not found")
 
-        subprocess.Popen(
-            [python_exe, "engine_service.py"],
-            cwd=engine_dir,
-            stdout=out_log,
-            stderr=err_log,
-        )
+            # Open, hand the fd to the child, then close our own copy immediately.
+            # Keeping a second append-mode handle open in this (parent) process
+            # contends with the child's handle on the same file and can hang
+            # the child at CRT startup (Windows append-mode locking).
+            with open(os.path.join(engine_dir, "engine.log"), "a") as out_log, \
+                 open(os.path.join(engine_dir, "engine_err.log"), "a") as err_log:
+                _engine_proc = subprocess.Popen(
+                    [python_exe, "engine_service.py"],
+                    cwd=engine_dir,
+                    stdin=subprocess.DEVNULL,
+                    stdout=out_log,
+                    stderr=err_log,
+                )
 
         start_time = time.time()
-        while time.time() - start_time < 10:
+        while time.time() - start_time < 45:
             try:
                 async with httpx.AsyncClient() as client:
                     resp = await client.get(f"{ENGINE_URL}/health", timeout=0.5)
@@ -140,9 +176,9 @@ async def _ensure_service():
                         return
             except Exception:
                 pass
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
-    raise RuntimeError("Engine service failed to start within 10 seconds")
+    raise RuntimeError("Engine service failed to start within 45 seconds")
 
 
 async def _ensure_browser():
