@@ -2,10 +2,13 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { render, Box, Text, useInput, useApp, useStdin, useStdout } from 'ink';
 import TextInput from 'ink-text-input';
 import { engine } from './engine_client.js';
-import { execSync, spawn } from 'child_process';
+import { execSync, exec, spawn } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+
+const execAsync = promisify(exec);
 
 const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR   = path.resolve(__dirname, '..', '..');
@@ -65,6 +68,94 @@ function clearChromeLocks() {
     const cmd = `powershell -NoProfile -Command "Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*ms-playwright*' } | Stop-Process -Force -ErrorAction SilentlyContinue"`;
     execSync(cmd, { stdio: 'ignore' });
   } catch (e) {}
+}
+
+// ── Process panel helpers (project-scoped tasklist wrapper) ─────────────────
+// tasklist's /V, /SVC and /M switches are mutually exclusive on the command
+// line, so a "merged" view is built by running /V and /SVC separately and
+// joining the rows on PID in JS.
+
+function parseCsvLine(line) {
+  return line.replace(/^"|"$/g, '').split('","');
+}
+
+async function listProjectProcesses() {
+  const cmd = `powershell -NoProfile -Command "$roots = Get-Process -ErrorAction SilentlyContinue | Where-Object { ($_.ProcessName -match '^python' -and $_.Path -like '*Gemi_Engine_V2*') -or ($_.ProcessName -eq 'chrome' -and $_.Path -like '*ms-playwright*') } | Select-Object -ExpandProperty Id; $all = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Select-Object ProcessId, ParentProcessId; $map = @{}; foreach ($p in $all) { $parent = $p.ParentProcessId; if ($parent) { if (-not $map.ContainsKey([int]$parent)) { $map[[int]$parent] = [System.Collections.Generic.List[int]]::new() } [void]$map[[int]$parent].Add([int]$p.ProcessId) } } $queue = [System.Collections.Generic.Queue[int]]::new(); $visited = [System.Collections.Generic.HashSet[int]]::new(); foreach ($r in $roots) { if ($r) { $queue.Enqueue([int]$r); [void]$visited.Add([int]$r); } } while ($queue.Count -gt 0) { $curr = $queue.Dequeue(); if ($map.ContainsKey($curr)) { foreach ($c in $map[$curr]) { if (-not $visited.Contains($c)) { $queue.Enqueue($c); [void]$visited.Add($c); } } } } $visited | ForEach-Object { [PSCustomObject]@{Id=$_} } | ConvertTo-Csv -NoTypeInformation"`;
+  try {
+    const { stdout } = await execAsync(cmd, { encoding: 'utf8' });
+    return stdout.trim().split(/\r?\n/).slice(1)
+      .map(l => parseInt(parseCsvLine(l)[0], 10))
+      .filter(n => !isNaN(n));
+  } catch (e) {
+    return [];
+  }
+}
+
+async function getTasklistRows(flag) {
+  try {
+    const { stdout } = await execAsync(`tasklist ${flag} /FO CSV /NH`, { encoding: 'utf8' });
+    return stdout.trim().split(/\r?\n/).map(parseCsvLine);
+  } catch (e) {
+    return [];
+  }
+}
+
+async function buildProcessList(pids) {
+  if (pids.length === 0) return [];
+  const pidSet = new Set(pids.map(String));
+  const [svcRows, vRows] = await Promise.all([getTasklistRows('/SVC'), getTasklistRows('/V')]);
+  const svcMap = {};
+  svcRows.forEach(cols => {
+    if (cols.length >= 3 && pidSet.has(cols[1])) svcMap[cols[1]] = cols[2];
+  });
+  const list = [];
+  vRows.forEach(cols => {
+    if (cols.length < 9) return;
+    const pid = cols[1];
+    if (!pidSet.has(pid)) return;
+    list.push({
+      pid: parseInt(pid, 10),
+      name: cols[0],
+      status: cols[5],
+      mem: cols[4],
+      user: cols[6],
+      cpu: cols[7],
+      windowTitle: cols[8],
+      services: svcMap[pid] || 'N/A',
+      modules: null,
+      modulesExpanded: false,
+    });
+  });
+  return list;
+}
+
+// tasklist /M /FO LIST prints one module per line (indent-continued), not
+// comma-separated, e.g.:
+//   Modules:      ntdll.dll
+//                 KERNEL32.DLL
+//                 ...
+async function getModulesForPid(pid) {
+  try {
+    const { stdout } = await execAsync(`tasklist /FI "PID eq ${pid}" /M /FO LIST`, { encoding: 'utf8' });
+    const lines   = stdout.split(/\r?\n/);
+    const modules = [];
+    let started = false;
+    for (const raw of lines) {
+      if (!started) {
+        const m = raw.match(/^Modules:\s*(.*)$/);
+        if (m) {
+          started = true;
+          if (m[1].trim()) modules.push(m[1].trim());
+        }
+        continue;
+      }
+      const trimmed = raw.trim();
+      if (trimmed) modules.push(trimmed);
+    }
+    return modules;
+  } catch (e) {
+    return [];
+  }
 }
 
 async function tuiDeleteProfile(profileName, reassignTo = null) {
@@ -401,6 +492,8 @@ const ACCT_ACTIONS = [
 ];
 const ACCT_ACTIONS_NEED_TARGET = ['Switch to Selected', 'Edit Display Name', 'Delete Profile', 'Rebuild Profile'];
 
+const PROC_ACTIONS = ['View Running Tasks', 'Force Kill', 'Kill All'];
+
 // LEFT_PANEL_WIDTH and LEFT_PANEL_PAD are calculated dynamically inside the App component to support flexible sizing.
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -493,7 +586,7 @@ const Header = React.memo(function Header({ engineStatus, browserStatus, activeA
   );
 });
 
-const TABS = ['dashboard', 'account', 'health'];
+const TABS = ['dashboard', 'account', 'health', 'process', 'exit'];
 
 const MenuBar = React.memo(function MenuBar({ activeTab, mode }) {
   const isMenu = mode === 'menu';
@@ -521,6 +614,22 @@ const MenuBar = React.memo(function MenuBar({ activeTab, mode }) {
         bold={!isMenu && activeTab === 'health'}
       >
         {' HEALTH '}
+      </Text>
+      <Text>  </Text>
+      <Text
+        color={activeTab === 'process' ? (isMenu ? 'black' : 'cyan') : 'gray'}
+        backgroundColor={isMenu && activeTab === 'process' ? 'cyan' : undefined}
+        bold={!isMenu && activeTab === 'process'}
+      >
+        {' PROCESS '}
+      </Text>
+      <Text>  </Text>
+      <Text
+        color={activeTab === 'exit' ? (isMenu ? 'black' : 'red') : 'gray'}
+        backgroundColor={isMenu && activeTab === 'exit' ? 'red' : undefined}
+        bold={!isMenu && activeTab === 'exit'}
+      >
+        {' CLEAN EXIT '}
       </Text>
       <Text>  </Text>
       {isMenu && <Text dimColor>(← → switch)</Text>}
@@ -768,6 +877,124 @@ const AccountsPane = React.memo(function AccountsPane({ profiles, selected, mode
   );
 });
 
+const ConfirmModal = React.memo(function ConfirmModal({ message, lines, selected }) {
+  return (
+    <Box flexDirection="column" width={MODAL_WIDTH + 4} borderStyle="single" borderColor="yellow" paddingX={1}>
+      {lines ? (
+        lines.map((line, i) => (
+          <Text key={i}>{padEndDisplay(line, MODAL_WIDTH)}</Text>
+        ))
+      ) : (
+        <Text>{padEndDisplay(message, MODAL_WIDTH)}</Text>
+      )}
+      <Box marginTop={1}>
+        <Text backgroundColor={selected === 0 ? 'cyan' : undefined} color={selected === 0 ? 'black' : undefined}> Cancel </Text>
+        <Text>   </Text>
+        <Text backgroundColor={selected === 1 ? 'cyan' : undefined} color={selected === 1 ? 'black' : undefined}> OK </Text>
+        <Text>{' '.repeat(Math.max(0, MODAL_WIDTH - 20))}</Text>
+      </Box>
+    </Box>
+  );
+});
+
+const ProcessActions = React.memo(function ProcessActions({ selected, mode, height, width }) {
+  const active = mode === 'proc_actions';
+  return (
+    <Box flexDirection="column" width={width} height={height} borderStyle="single"
+         borderColor={active ? 'cyan' : undefined} paddingX={1} flexShrink={0}>
+      {PROC_ACTIONS.map((action, i) => (
+        <Box key={action}>
+          <Text
+            color={i === selected ? (active ? 'black' : 'cyan') : undefined}
+            backgroundColor={active && i === selected ? 'cyan' : undefined}
+          >
+            {` ${action} `}
+          </Text>
+        </Box>
+      ))}
+      <Box marginTop={1}>
+        <Text dimColor>→ select · Enter run</Text>
+      </Box>
+    </Box>
+  );
+});
+
+const PROC_COLS = { pid: 7, name: 16, status: 10, mem: 11, cpu: 9 };
+
+const ProcessList = React.memo(function ProcessList({ list, selected, mode, height, width }) {
+  const active    = mode === 'proc_list';
+  const innerRows = Math.max(1, height - 6);
+
+  // Flatten: each process row, followed by its module lines when expanded
+  const flat = [];
+  list.forEach((p, idx) => {
+    flat.push({ type: 'proc', idx, p });
+    if (p.modulesExpanded && p.modules) {
+      p.modules.forEach((m, mi) => flat.push({ type: 'module', key: `${idx}-${mi}`, text: m }));
+    }
+  });
+
+  const total      = flat.length;
+  const selFlatIdx = Math.max(0, flat.findIndex(f => f.type === 'proc' && f.idx === selected));
+  const scrollOff  = Math.max(0, Math.min(selFlatIdx - Math.floor(innerRows / 2), Math.max(0, total - innerRows)));
+  const visible    = flat.slice(scrollOff, scrollOff + innerRows);
+  const bar        = scrollbar(total, innerRows, scrollOff);
+
+  const textWidth = Math.max(20, width - 4 - (total > innerRows ? 1 : 0) - 1);
+  const headerRow = padEndDisplay(
+    ' ' + 'PID'.padEnd(PROC_COLS.pid) + 'Name'.padEnd(PROC_COLS.name) + 'Status'.padEnd(PROC_COLS.status) +
+    'Mem'.padEnd(PROC_COLS.mem) + 'CPU'.padEnd(PROC_COLS.cpu) + 'Services',
+    textWidth
+  );
+
+  return (
+    <Box flexDirection="column" width={width} height={height} borderStyle="single"
+         borderColor={active ? 'cyan' : undefined} paddingX={1} flexShrink={0}>
+      <Text bold underline>{active ? '▶ ' : '  '}Active Processes <Text dimColor>({list.length}) — Enter: expand modules</Text></Text>
+      <Box marginTop={1} flexDirection="row">
+        <Box flexDirection="column" flexGrow={1}>
+          <Text color="white" backgroundColor="blue">{headerRow}</Text>
+          {total === 0
+            ? <Text dimColor>No project processes running</Text>
+            : visible.map((row) => {
+                if (row.type === 'module') {
+                  return <Text key={row.key} dimColor>{'    ' + truncateDisplay(row.text, Math.max(4, textWidth - 4))}</Text>;
+                }
+                const p = row.p;
+                const isSelected  = row.idx === selected;
+                const isActiveSel = active && isSelected;
+                const mark = p.modulesExpanded ? '▼' : ' ';
+                const rowStr = padEndDisplay(
+                  mark + String(p.pid).padEnd(PROC_COLS.pid) + truncateDisplay(p.name, PROC_COLS.name - 1).padEnd(PROC_COLS.name) +
+                  truncateDisplay(p.status, PROC_COLS.status - 1).padEnd(PROC_COLS.status) +
+                  truncateDisplay(p.mem, PROC_COLS.mem - 1).padEnd(PROC_COLS.mem) +
+                  truncateDisplay(p.cpu, PROC_COLS.cpu - 1).padEnd(PROC_COLS.cpu) +
+                  truncateDisplay(p.services, 24),
+                  textWidth
+                );
+                return (
+                  <Text key={p.pid}
+                    color={isSelected ? (active ? 'black' : 'cyan') : 'white'}
+                    backgroundColor={isActiveSel ? 'cyan' : undefined}
+                  >
+                    {rowStr}
+                  </Text>
+                );
+              })
+          }
+        </Box>
+        {total > innerRows && (
+          <Box flexDirection="column" width={1}>
+            <Text dimColor> </Text>
+            <Text dimColor> </Text>
+            {bar.map((ch, i) => <Text key={i} dimColor>{ch}</Text>)}
+          </Box>
+        )}
+      </Box>
+    </Box>
+  );
+});
+
 const LogPanel = React.memo(function LogPanel({ logs, scrollOffset, mode, height, width }) {
   const active    = mode === 'log';
   const innerRows = Math.max(1, height - 4);
@@ -862,6 +1089,25 @@ function App() {
   const [regModalStage, setRegModalStage] = useState(null);
   const [regTargetProfile, setRegTargetProfile] = useState(null);
   const [repackConfirmSelected, setRepackConfirmSelected] = useState(0); // 0 = Cancel, 1 = OK — default to Cancel for safety
+
+  const [procActionSelected, setProcActionSelected] = useState(0);
+  const [procList, setProcList]                     = useState([]);
+  const [procListSelected, setProcListSelected]     = useState(0);
+  const [procMode, setProcMode]                     = useState('view'); // 'view' | 'kill'
+  const [killAllConfirmSelected, setKillAllConfirmSelected] = useState(0);
+  const [exitConfirmSelected, setExitConfirmSelected] = useState(0);
+  const procActionSelectedRef = useRef(0);
+  const procListRef           = useRef([]);
+  const procListSelectedRef   = useRef(0);
+  const procModeRef           = useRef('view');
+  const killAllConfirmSelectedRef = useRef(0);
+  const exitConfirmSelectedRef = useRef(0);
+  useEffect(() => { procActionSelectedRef.current = procActionSelected; }, [procActionSelected]);
+  useEffect(() => { procListRef.current = procList; }, [procList]);
+  useEffect(() => { procListSelectedRef.current = procListSelected; }, [procListSelected]);
+  useEffect(() => { procModeRef.current = procMode; }, [procMode]);
+  useEffect(() => { killAllConfirmSelectedRef.current = killAllConfirmSelected; }, [killAllConfirmSelected]);
+  useEffect(() => { exitConfirmSelectedRef.current = exitConfirmSelected; }, [exitConfirmSelected]);
 
   const [statusBar, setStatusBar]       = useState('Ready.');
   const [servicePid, setServicePid]     = useState(null);
@@ -1352,6 +1598,57 @@ function App() {
     return () => clearInterval(poll);
   }, [refreshProfiles]);
 
+  // ── Process panel ────────────────────────────────────────────────────────────
+
+  const refreshProcesses = useCallback(async () => {
+    try {
+      const pids = await listProjectProcesses();
+      const rows = await buildProcessList(pids);
+      setProcList(prev => rows.map(r => {
+        const old = prev.find(o => o.pid === r.pid);
+        return old && old.modulesExpanded ? { ...r, modulesExpanded: true, modules: old.modules } : r;
+      }));
+    } catch (e) {
+      setStatusBar(`Process scan failed: ${e.message}`);
+    }
+  }, []);
+
+  const doForceKill = useCallback(async (pid) => {
+    try {
+      await execAsync(`taskkill /PID ${pid} /F /T`);
+      setStatusBar(`Killed PID ${pid}.`);
+    } catch (e) {
+      setStatusBar(`Kill failed: ${e.message}`);
+    }
+    refreshProcesses();
+  }, [refreshProcesses]);
+
+  const doKillAll = useCallback(async () => {
+    const list = procListRef.current;
+    await Promise.all(list.map(p => execAsync(`taskkill /PID ${p.pid} /F /T`).catch(() => {})));
+    setStatusBar(`Killed ${list.length} process(es).`);
+    refreshProcesses();
+  }, [refreshProcesses]);
+
+  const toggleModulesForSelected = useCallback(async () => {
+    const idx = procListSelectedRef.current;
+    const p   = procListRef.current[idx];
+    if (!p) return;
+    if (p.modulesExpanded) {
+      setProcList(prev => prev.map((x, i) => i === idx ? { ...x, modulesExpanded: false } : x));
+    } else {
+      const modules = await getModulesForPid(p.pid);
+      setProcList(prev => prev.map((x, i) => i === idx ? { ...x, modules, modulesExpanded: true } : x));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== 'process') return;
+    refreshProcesses();
+    const poll = setInterval(refreshProcesses, 3000);
+    return () => clearInterval(poll);
+  }, [activeTab, refreshProcesses]);
+
 
   // ── Keyboard ──────────────────────────────────────────────────────────────────
 
@@ -1367,6 +1664,12 @@ function App() {
     const repackConfirmSelected = repackConfirmSelectedRef.current;
     const profiles = profilesRef.current;
     const logs = logsRef.current;
+    const procActionSelected = procActionSelectedRef.current;
+    const procList = procListRef.current;
+    const procListSelected = procListSelectedRef.current;
+    const procMode = procModeRef.current;
+    const killAllConfirmSelected = killAllConfirmSelectedRef.current;
+    const exitConfirmSelected = exitConfirmSelectedRef.current;
 
     if (key.ctrl && char === 'c') {
       engine.stop().catch(() => {}).finally(() => exit());
@@ -1395,6 +1698,48 @@ function App() {
           handleAcctAction('Repack Profile IDs');
         }
         setMode('acct_actions');
+      }
+      return;
+    }
+
+    if (mode === 'proc_killall_confirm') {
+      if (key.leftArrow || key.rightArrow) {
+        setKillAllConfirmSelected(s => (s === 0 ? 1 : 0));
+      }
+      if (key.escape || key.tab) {
+        setMode('proc_actions');
+        return;
+      }
+      if (key.return) {
+        if (killAllConfirmSelected === 1) doKillAll();
+        setMode('proc_actions');
+      }
+      return;
+    }
+
+    if (mode === 'exit_confirm') {
+      if (key.leftArrow || key.rightArrow) {
+        setExitConfirmSelected(s => (s === 0 ? 1 : 0));
+      }
+      if (key.escape || key.tab) {
+        setMode('menu');
+        return;
+      }
+      if (key.return) {
+        if (exitConfirmSelected === 1) {
+          (async () => {
+            try {
+              const pids = await listProjectProcesses();
+              await Promise.all(pids.map(pid => execAsync(`taskkill /PID ${pid} /F /T`).catch(() => {})));
+            } catch (e) {
+              // ignore
+            } finally {
+              engine.stop().catch(() => {}).finally(() => exit());
+            }
+          })();
+        } else {
+          setMode('menu');
+        }
       }
       return;
     }
@@ -1434,6 +1779,8 @@ function App() {
       } else if (mode === 'account_list') {
         setMode('acct_actions');
         setPendingAction(null);
+      } else if (mode === 'proc_list') {
+        setMode('proc_actions');
       } else if (mode === 'actions') {
         const vl    = buildVisibleList(expandedGroups);
         const entry = vl[selected];
@@ -1464,7 +1811,14 @@ function App() {
         });
       }
       if (key.return || key.downArrow) {
-        setMode(activeTab === 'dashboard' ? 'actions' : activeTab === 'account' ? 'acct_actions' : 'health_view');
+        if (activeTab === 'dashboard') setMode('actions');
+        else if (activeTab === 'account') setMode('acct_actions');
+        else if (activeTab === 'health') setMode('health_view');
+        else if (activeTab === 'process') setMode('proc_actions');
+        else if (activeTab === 'exit') {
+          setExitConfirmSelected(0);
+          setMode('exit_confirm');
+        }
       }
       return;
     }
@@ -1614,6 +1968,47 @@ function App() {
       return;
     }
 
+    // ── Process left panel (proc_actions) ────────────────────────────────────
+    if (mode === 'proc_actions') {
+      if (key.upArrow)   setProcActionSelected(s => Math.max(0, s - 1));
+      if (key.downArrow) setProcActionSelected(s => Math.min(PROC_ACTIONS.length - 1, s + 1));
+      const action = PROC_ACTIONS[procActionSelected];
+      if (key.return) {
+        if (action === 'View Running Tasks') {
+          refreshProcesses();
+          setStatusBar('Process list refreshed.');
+        } else if (action === 'Force Kill') {
+          setStatusBar('Press → then select a process, Enter to force kill.');
+        } else if (action === 'Kill All') {
+          setKillAllConfirmSelected(0);
+          setMode('proc_killall_confirm');
+        }
+      }
+      if (key.rightArrow) {
+        setProcMode(action === 'Force Kill' ? 'kill' : 'view');
+        setMode('proc_list');
+      }
+      return;
+    }
+
+    // ── Process right panel (proc_list) ──────────────────────────────────────
+    if (mode === 'proc_list') {
+      if (key.leftArrow) {
+        setMode('proc_actions');
+        return;
+      }
+      if (key.upArrow)   setProcListSelected(s => Math.max(0, s - 1));
+      if (key.downArrow) setProcListSelected(s => Math.min(Math.max(0, procList.length - 1), s + 1));
+      if (key.return) {
+        const p = procList[procListSelected];
+        if (p) {
+          if (procMode === 'kill') doForceKill(p.pid);
+          else toggleModulesForSelected();
+        }
+      }
+      return;
+    }
+
   }, { isActive: isRawModeSupported });
 
   // ── Render ────────────────────────────────────────────────────────────────────
@@ -1624,7 +2019,21 @@ function App() {
       <MenuBar activeTab={activeTab} mode={mode} />
       
       <Box flexGrow={1} height={mainHeight} flexDirection="row">
-        {activeTab === 'dashboard' ? (
+        {mode === 'exit_confirm' ? (
+          <Box width={leftPanelWidth + rightPanelWidth} height={mainHeight} alignItems="center" justifyContent="center">
+            <ConfirmModal
+              lines={[
+                "Clean Exit will kill ALL project PIDs (engine + browser)",
+                "and then exit the TUI.",
+                "",
+                "Press Enter to kill everything and exit.",
+                "To keep background processes running instead, close this",
+                "window using the X button in the top-right corner."
+              ]}
+              selected={exitConfirmSelected}
+            />
+          </Box>
+        ) : activeTab === 'dashboard' ? (
           <>
             <Controls
               selected={selected}
@@ -1677,6 +2086,32 @@ function App() {
                 />
               </Box>
             )}
+          </Box>
+        ) : activeTab === 'process' ? (
+          mode === 'proc_killall_confirm' ? (
+            <Box width={leftPanelWidth + rightPanelWidth} height={mainHeight} alignItems="center" justifyContent="center">
+              <ConfirmModal message={`Force-kill all ${procList.length} project process(es)? This cannot be undone.`} selected={killAllConfirmSelected} />
+            </Box>
+          ) : (
+            <Box flexDirection="row" width={leftPanelWidth + rightPanelWidth} height={mainHeight}>
+              <ProcessActions
+                selected={procActionSelected}
+                mode={mode}
+                height={mainHeight}
+                width={leftPanelWidth}
+              />
+              <ProcessList
+                list={procList}
+                selected={procListSelected}
+                mode={mode}
+                height={mainHeight}
+                width={rightPanelWidth}
+              />
+            </Box>
+          )
+        ) : activeTab === 'exit' ? (
+          <Box width={leftPanelWidth + rightPanelWidth} height={mainHeight} alignItems="center" justifyContent="center">
+            <Text dimColor>Press Enter for Clean Exit (kills all project PIDs)</Text>
           </Box>
         ) : (
           <Box width={leftPanelWidth + rightPanelWidth} height={mainHeight} alignItems="center" justifyContent="center">
