@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { render, Box, Text, useInput, useApp, useStdin, useStdout } from 'ink';
 import TextInput from 'ink-text-input';
 import { engine } from './engine_client.js';
+import { buildReorderRenameMap, isNumberedProfile } from './reorder_map.js';
 import { execSync, exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
@@ -434,6 +435,87 @@ async function tuiRepackProfileIDs() {
   }
 }
 
+// Apply a { oldFolder: newFolder } permutation from the Reorder Profiles action.
+// Unlike repack, entries absent from the map are left untouched (the map only
+// covers moved folders, and hidden/no-email profiles must not be dropped).
+async function tuiReorderProfiles(renameMap) {
+  clearChromeLocks();
+  const folders = Object.keys(renameMap);
+
+  // Two-phase rename to avoid collisions (the map is a permutation)
+  folders.forEach(folder => {
+    try { fs.renameSync(path.join(DATA_DIR, folder), path.join(DATA_DIR, folder + '_temp')); } catch (e) {}
+  });
+  folders.forEach(folder => {
+    try { fs.renameSync(path.join(DATA_DIR, folder + '_temp'), path.join(DATA_DIR, renameMap[folder])); } catch (e) {}
+  });
+
+  const localState = readLocalState();
+  if (localState.profile) {
+    const profile = localState.profile;
+    if (profile.info_cache) {
+      const newCache = {};
+      Object.entries(profile.info_cache).forEach(([k, v]) => { newCache[renameMap[k] || k] = v; });
+      profile.info_cache = newCache;
+    }
+    if (profile.profiles_order) {
+      // The order array is a permutation of itself after a reorder; keep it in
+      // sync with the new ID order (non-numbered entries first, like repack).
+      const nonNum = profile.profiles_order.filter(p => !isNumberedProfile(p));
+      const num = profile.profiles_order.filter(isNumberedProfile)
+        .sort((a, b) => parseInt(a.split(' ')[1], 10) - parseInt(b.split(' ')[1], 10));
+      profile.profiles_order = [...nonNum, ...num];
+    }
+    if (profile.last_used && renameMap[profile.last_used]) {
+      profile.last_used = renameMap[profile.last_used];
+    }
+    if (profile.last_active_profiles) {
+      profile.last_active_profiles = profile.last_active_profiles.map(p => renameMap[p] || p);
+    }
+  }
+  if (localState.variations_google_groups) {
+    const newVgg = {};
+    Object.entries(localState.variations_google_groups).forEach(([k, v]) => { newVgg[renameMap[k] || k] = v; });
+    localState.variations_google_groups = newVgg;
+  }
+  writeLocalState(localState);
+
+  // config.json may need its active_profile renamed too. Go through the engine
+  // when it's up (it keeps config in memory); fall back to editing config.json
+  // directly when it's offline — reorder requires the browser closed, so the
+  // engine is often stopped here.
+  const cfg = readConfig();
+  if (cfg.active_profile && renameMap[cfg.active_profile]) {
+    const upd = { active_profile: renameMap[cfg.active_profile] };
+    try {
+      await engine.saveConfig(upd);
+    } catch (e) {
+      writeConfig({ ...cfg, ...upd });
+    }
+  }
+}
+
+// Local mirror of browser_engine.get_profiles() (minus the empty-profile
+// cleanup side effect) so the Account tab keeps working with the engine down.
+function localGetProfiles() {
+  const cache = readLocalState().profile?.info_cache || {};
+  const items = [];
+  Object.entries(cache).forEach(([dir, info]) => {
+    const email = (info.user_name || '').trim();
+    if (!email) return;
+    items.push({ dir, email, name: (info.gaia_name || info.name || '').trim() });
+  });
+  items.sort((a, b) => {
+    const ma = a.dir.match(/^Profile (\d+)$/);
+    const mb = b.dir.match(/^Profile (\d+)$/);
+    if (ma && mb) return parseInt(ma[1], 10) - parseInt(mb[1], 10);
+    if (ma) return -1;
+    if (mb) return 1;
+    return a.dir < b.dir ? -1 : 1;
+  });
+  return items;
+}
+
 
 // ── Dashboard groups (collapsible tree) ──────────────────────────────────────
 const GROUPS = [
@@ -487,10 +569,11 @@ const ACCT_ACTIONS = [
   'Edit Display Name',
   'Delete Profile',
   'Rebuild Profile',
+  'Reorder Profiles',
   'Create New Profile',
   'Repack Profile IDs'
 ];
-const ACCT_ACTIONS_NEED_TARGET = ['Switch to Selected', 'Edit Display Name', 'Delete Profile', 'Rebuild Profile'];
+const ACCT_ACTIONS_NEED_TARGET = ['Switch to Selected', 'Edit Display Name', 'Delete Profile', 'Rebuild Profile', 'Reorder Profiles'];
 
 const PROC_ACTIONS = ['View Running Tasks', 'Force Kill', 'Kill All'];
 
@@ -819,12 +902,15 @@ const RepackConfirmModal = React.memo(function RepackConfirmModal({ selected }) 
 
 
 
-const AccountsPane = React.memo(function AccountsPane({ profiles, selected, mode, height, width }) {
-  const active    = mode === 'account_list';
+const AccountsPane = React.memo(function AccountsPane({ profiles, selected, mode, height, width, reorderList, reorderIndex }) {
+  const reordering = mode === 'acct_reorder' && !!reorderList;
+  const active    = mode === 'account_list' || reordering;
+  const rows      = reordering ? reorderList : profiles;
+  const sel       = reordering ? reorderIndex : selected;
   const innerRows = Math.max(1, height - 6);
-  const total     = profiles.length;
-  const scrollOff = Math.max(0, Math.min(selected - Math.floor(innerRows / 2), total - innerRows));
-  const visible   = profiles.slice(scrollOff, scrollOff + innerRows);
+  const total     = rows.length;
+  const scrollOff = Math.max(0, Math.min(sel - Math.floor(innerRows / 2), total - innerRows));
+  const visible   = rows.slice(scrollOff, scrollOff + innerRows);
   const bar       = scrollbar(total, innerRows, scrollOff);
 
   const nameWidth = Math.min(30, profiles.length > 0
@@ -838,7 +924,7 @@ const AccountsPane = React.memo(function AccountsPane({ profiles, selected, mode
   return (
     <Box flexDirection="column" width={width} height={height} borderStyle="single"
          borderColor={active ? 'cyan' : undefined} paddingX={1} flexShrink={0}>
-      <Text bold underline>{active ? '▶ ' : '  '}Account List <Text dimColor>({total})</Text></Text>
+      <Text bold underline>{active ? '▶ ' : '  '}Account List <Text dimColor>({total}){reordering ? ' — ↑/↓ move · Enter save · Esc cancel' : ''}</Text></Text>
       <Box marginTop={1} flexDirection="row">
         <Box flexDirection="column" flexGrow={1}>
           <Text color="white" backgroundColor="blue">{headerRow}</Text>
@@ -846,18 +932,23 @@ const AccountsPane = React.memo(function AccountsPane({ profiles, selected, mode
             ? <Text dimColor>No profiles found</Text>
             : visible.map((p, vi) => {
                 const gi    = vi + scrollOff;
-                const id    = profileId(p.dir);
+                // While reordering, IDs stay with list positions (names travel),
+                // so show the ID each row WILL have after the rename: the one
+                // held by the original profile at this slot.
+                const idSrc = reordering && profiles[gi] ? profiles[gi] : p;
+                const id    = profileId(idSrc.dir);
                 const rawNm = p.name || p.email || p.dir || '';
                 const nm    = padEndDisplay(truncateDisplay(rawNm, nameWidth), nameWidth);
                 const em    = p.email || '';
                 const displayEm = truncateDisplay(em, maxEmLen);
-                const isSelected = gi === selected;
+                const isSelected = gi === sel;
                 const isActiveSel = active && isSelected;
+                const grabbed = reordering && isSelected;
                 const rowStr = padEndDisplay(` ${String(id).padStart(2)}     ${nm}   ${displayEm}`, textWidth);
                 return (
                   <Text key={p.dir}
                     color={isSelected ? (active ? 'black' : 'cyan') : 'white'}
-                    backgroundColor={isActiveSel ? 'cyan' : undefined}
+                    backgroundColor={grabbed ? 'yellow' : (isActiveSel ? 'cyan' : undefined)}
                   >
                     {rowStr}
                   </Text>
@@ -1071,7 +1162,10 @@ function App() {
   const refreshProfiles = useCallback(async () => {
     try {
       setProfiles(await engine.getProfiles());
-    } catch (e) {}
+    } catch (e) {
+      // Engine offline — read the same data locally from Local State
+      try { setProfiles(localGetProfiles()); } catch (e2) {}
+    }
   }, []);
   const [selected, setSelected]         = useState(0);
   const [acctSelected, setAcctSelected] = useState(0);
@@ -1088,6 +1182,12 @@ function App() {
   useEffect(() => { domCaptureArmedRef.current = domCaptureArmed; }, [domCaptureArmed]);
   const [regModalStage, setRegModalStage] = useState(null);
   const [regTargetProfile, setRegTargetProfile] = useState(null);
+  const [reorderList, setReorderList]   = useState(null); // working copy while mode === 'acct_reorder'
+  const [reorderIndex, setReorderIndex] = useState(0);    // grabbed row position in reorderList
+  const reorderListRef  = useRef(null);
+  const reorderIndexRef = useRef(0);
+  useEffect(() => { reorderListRef.current = reorderList; }, [reorderList]);
+  useEffect(() => { reorderIndexRef.current = reorderIndex; }, [reorderIndex]);
   const [repackConfirmSelected, setRepackConfirmSelected] = useState(0); // 0 = Cancel, 1 = OK — default to Cancel for safety
 
   const [procActionSelected, setProcActionSelected] = useState(0);
@@ -1343,7 +1443,9 @@ function App() {
 
       setStatusBar(`Switched to ${target}`);
     } catch (e) {
-      setStatusBar(`ERROR: ${e.message}`);
+      setStatusBar(e.message.includes('fetch failed')
+        ? 'ERROR: Engine is offline — start the engine before switching accounts.'
+        : `ERROR: ${e.message}`);
     }
   }, []);
 
@@ -1358,6 +1460,69 @@ function App() {
     setDomClickValue('');
     setMode('actions');
   }, []);
+
+  // ── Reorder Profiles (grab → move → commit/cancel) ───────────────────────────
+
+  const startReorder = useCallback(() => {
+    const p = profilesRef.current[acctSelectedRef.current];
+    if (!p) return;
+    if (browserStatusRef.current === 'online') {
+      setStatusBar('ERROR: Close the browser before reordering profiles.');
+      return;
+    }
+    if (!isNumberedProfile(p.dir)) {
+      setStatusBar(`Cannot reorder "${p.dir}" — only "Profile N" folders have an ID to swap.`);
+      return;
+    }
+    setReorderList(profilesRef.current.slice());
+    setReorderIndex(acctSelectedRef.current);
+    setPendingAction(null);
+    setMode('acct_reorder');
+    setStatusBar('Reorder: ↑/↓ move · Enter save · ←/Tab/Esc cancel');
+  }, []);
+
+  const cancelReorder = useCallback(() => {
+    setReorderList(null);
+    setPendingAction(null);
+    setMode('acct_actions');
+    setStatusBar('Reorder canceled — order restored.');
+  }, []);
+
+  const commitReorder = useCallback(async () => {
+    const orig = profilesRef.current;
+    const next = reorderListRef.current || [];
+    const finalIndex = reorderIndexRef.current;
+    setReorderList(null);
+    // Stay armed: back in the list, Enter grabs another account instead of
+    // falling through to switch-account (which needs the engine online).
+    setPendingAction('Reorder Profiles');
+    setMode('account_list');
+    // Guard: the 5s profile poll may have changed the list under us (profile
+    // added/removed on disk mid-grab) — the snapshot is then stale, abort.
+    if (orig.map(p => p.dir).sort().join('\n') !== next.map(p => p.dir).sort().join('\n')) {
+      setStatusBar('ERROR: Profile list changed during reorder — canceled.');
+      return;
+    }
+    const renameMap = buildReorderRenameMap(orig.map(p => p.dir), next.map(p => p.dir));
+    if (Object.keys(renameMap).length === 0) {
+      setStatusBar('Order unchanged.');
+      return;
+    }
+    if (browserStatusRef.current === 'online') {
+      setStatusBar('ERROR: Close the browser before reordering profiles.');
+      return;
+    }
+    try {
+      setStatusBar('Reordering profiles...');
+      await tuiReorderProfiles(renameMap);
+      await refreshProfiles();
+      setAcctSelected(finalIndex);
+      setStatusBar('Profiles reordered. Enter grabs another account · ←/Esc done.');
+    } catch (e) {
+      setStatusBar(`ERROR: ${e.message}`);
+      refreshProfiles();
+    }
+  }, [refreshProfiles]);
 
   const handleAcctAction = useCallback(async (action) => {
     const browserRunning = browserStatusRef.current === 'online';
@@ -1451,6 +1616,8 @@ function App() {
           setStatusBar(`ERROR: ${e.message}`);
         }
       })();
+    } else if (action === 'Reorder Profiles') {
+      startReorder();
     } else if (action === 'Create New Profile') {
       // Create = open a headed browser in an isolated staging directory (never the
       // real browser_user_data/) so it can't collide with any other Chrome instance's
@@ -1475,7 +1642,7 @@ function App() {
         }
       })();
     }
-  }, [acctSelected, doSwitchAccount, refreshProfiles]);
+  }, [acctSelected, doSwitchAccount, refreshProfiles, startReorder]);
 
 
   // ── Registration Modal Poll ────────────────────────────────────────────────────
@@ -1779,6 +1946,8 @@ function App() {
       } else if (mode === 'account_list') {
         setMode('acct_actions');
         setPendingAction(null);
+      } else if (mode === 'acct_reorder') {
+        cancelReorder();
       } else if (mode === 'proc_list') {
         setMode('proc_actions');
       } else if (mode === 'actions') {
@@ -1968,6 +2137,29 @@ function App() {
       return;
     }
 
+    // ── Account reorder (grabbed row rides ↑/↓; Tab/Esc handled above) ───────
+    if (mode === 'acct_reorder') {
+      if (key.leftArrow) {
+        cancelReorder();
+        return;
+      }
+      if (key.upArrow || key.downArrow) {
+        const list = reorderListRef.current || [];
+        const idx  = reorderIndexRef.current;
+        const j    = idx + (key.upArrow ? -1 : 1);
+        // Only swap with another "Profile N" row — non-numbered dirs have no ID
+        // to trade, so the grabbed row can't move past them.
+        if (j >= 0 && j < list.length && isNumberedProfile(list[j].dir)) {
+          const next = list.slice();
+          [next[idx], next[j]] = [next[j], next[idx]];
+          setReorderList(next);
+          setReorderIndex(j);
+        }
+      }
+      if (key.return) commitReorder();
+      return;
+    }
+
     // ── Process left panel (proc_actions) ────────────────────────────────────
     if (mode === 'proc_actions') {
       if (key.upArrow)   setProcActionSelected(s => Math.max(0, s - 1));
@@ -2083,6 +2275,8 @@ function App() {
                   mode={mode}
                   height={mainHeight}
                   width={rightPanelWidth}
+                  reorderList={reorderList}
+                  reorderIndex={reorderIndex}
                 />
               </Box>
             )}
