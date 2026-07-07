@@ -30,7 +30,6 @@ ENGINE_URL = os.environ.get("GEMI_ENGINE_URL", f"http://127.0.0.1:{ENGINE_PORT}"
 
 mcp = FastMCP("gemi-mcp-v2")
 
-SERVICES = "'gemini', 'deepseek', 'copilot', or 'zai'"
 
 # Guards concurrent tool calls within this process from each independently
 # seeing the engine down and Popen-ing a duplicate instance.
@@ -232,12 +231,12 @@ async def discover_capabilities(service: Optional[str] = None) -> str:
     verify that a previous apply_settings call succeeded.
 
     Args:
-        service: Target service ({services}). Omit to use the currently active one.
+        service: Target service ('gemini', 'deepseek', 'copilot', or 'zai'). Omit to use the currently active one.
 
     Returns:
         JSON with available models, tools, sub_tools, thinking levels,
         current_model, and current_thinking_level.
-    """.format(services=SERVICES)
+    """
     await _ensure_browser()
     data = await _post("/browser/discover", params={"service": service} if service else None)
     if data.get("status") == "success":
@@ -266,8 +265,8 @@ async def apply_settings(
         tool:           Tool name, e.g. "Image generation", "Deep Research".
         sub_tool:       Sub-tool name, if the tool has a dropdown (partial match ok).
         thinking_level: e.g. "Low", "Medium", "High", "Extended" (partial match ok).
-        service:        Target service ({services}).
-    """.format(services=SERVICES)
+        service:        Target service ('gemini', 'deepseek', 'copilot', or 'zai').
+    """
     await _ensure_browser()
     data = await _post("/browser/apply_settings", {
         "model": model, "tool": tool,
@@ -370,14 +369,14 @@ async def submit_response(
     Args:
         prompt:   Optional text to type and submit in one shot.
                   If None, submits whatever is already staged in the input box.
-        service:  Target service ({services}).
+        service:  Target service ('gemini', 'deepseek', 'copilot', or 'zai').
         wait:     If True (default), block until generation is complete.
                   If False, return immediately after clicking Submit.
         timeout:  Max seconds to wait when wait=True (default 180).
 
     Returns:
         Generation status and summary when wait=True; "submitted" when wait=False.
-    """.format(services=SERVICES)
+    """
     await _ensure_browser()
     if prompt:
         await _post("/browser/prompt", {"text": prompt})
@@ -402,11 +401,11 @@ async def get_last_response(service: Optional[str] = None) -> str:
     timed out mid-generation.
 
     Args:
-        service: Target service ({services}).
+        service: Target service ('gemini', 'deepseek', 'copilot', or 'zai').
 
     Returns:
         done=True/False and the current response text.
-    """.format(services=SERVICES)
+    """
     await _ensure_browser()
     data = await _get("/browser/last_response",
                       params={"service": service} if service else None)
@@ -476,8 +475,8 @@ async def send_chat(
     Args:
         prompt:           Text message to send.
         new_conversation: If True (default), start a fresh chat first.
-        service:          Target service ({services}).
-    """.format(services=SERVICES)
+        service:          Target service ('gemini', 'deepseek', 'copilot', or 'zai').
+    """
     await _ensure_browser()
     if new_conversation:
         await _post("/browser/new_chat", params={"service": service} if service else None)
@@ -515,8 +514,8 @@ async def download_images(
         prefix:   Filename prefix, e.g. "img" → img0001.png, img0002.png.
         padding:  Zero-padding width for the counter (default 4).
         start:    Starting counter number (default 1).
-        service:  Target service ({services}).
-    """.format(services=SERVICES)
+        service:  Target service ('gemini', 'deepseek', 'copilot', or 'zai').
+    """
     await _ensure_browser()
     data = await _post("/browser/download", {
         "save_dir": save_dir,
@@ -542,8 +541,8 @@ async def redo_response(service: Optional[str] = None) -> str:
     Follow with get_last_response or download_images once done.
 
     Args:
-        service: Target service ({services}).
-    """.format(services=SERVICES)
+        service: Target service ('gemini', 'deepseek', 'copilot', or 'zai').
+    """
     await _ensure_browser()
     data = await _post("/browser/redo", params={"service": service} if service else None)
     if data.get("status") == "success":
@@ -561,8 +560,8 @@ async def new_chat(service: Optional[str] = None) -> str:
     prompt (e.g. send_chat("What is your name?")) to confirm active service.
 
     Args:
-        service: Target service ({services}).
-    """.format(services=SERVICES)
+        service: Target service ('gemini', 'deepseek', 'copilot', or 'zai').
+    """
     await _ensure_browser()
     data = await _post("/browser/new_chat", params={"service": service} if service else None)
     if data.get("status") == "success":
@@ -580,8 +579,8 @@ async def switch_service(service: str) -> str:
     Always follow with a verify call (e.g. send_chat("What is your name?")).
 
     Args:
-        service: One of {services}.
-    """.format(services=SERVICES)
+        service: One of 'gemini', 'deepseek', 'copilot', or 'zai'.
+    """
     await _ensure_browser()
     data = await _post("/browser/switch_service", {"service": service})
     if data.get("status") == "success":
@@ -694,12 +693,12 @@ async def get_health_metrics(provider: Optional[str] = None) -> str:
     account/provider is getting rate-limited or refusing more than usual.
 
     Args:
-        provider: Filter to one provider ({services}). Omit for stats across all.
+        provider: Filter to one provider ('gemini', 'deepseek', 'copilot', or 'zai'). Omit for stats across all.
 
     Returns:
         Formatted text block with total_attempts, success_rate, refusal_rate,
         timeout_rate, and average_response_time (seconds).
-    """.format(services=SERVICES)
+    """
     m = get_metrics(provider)
     return (
         f"Provider: {provider or 'all'}\n"
