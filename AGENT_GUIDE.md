@@ -64,6 +64,7 @@ the session.
 | `download_images(save_dir)` | Save generated images (not needed for code tasks). |
 | `get_health_metrics(provider=...)` | Success/refusal/timeout rates — diagnose rate-limiting. |
 | `delete_history(range_name)` | Wipe conversation history on the service. |
+| `audit_selectors(service=...)` | Selector health audit: broken / degraded / state-dependent. Run on element-not-found errors. |
 | `engine_status()` / `get_browser_tabs()` | Low-level diagnostics. |
 
 ## 4. The workflow
@@ -222,7 +223,23 @@ When the codebase exceeds what one conversation handles well:
 | Repeated timeouts / suspected rate limit | `get_health_metrics(provider=...)` to confirm, then `switch_account(...)` or `switch_service(...)`. |
 | Reply has elided code (`...`) | Same conversation: "Resend <path> complete, no omitted lines." |
 | Reply claims it can't see the attachment | You're on a stub service or upload flaked — fall back to text-in-prompt (Tier 1/3). |
+| Timeout / element-not-found | Run `audit_selectors()` first to distinguish DOM drift (broken selectors) from a transient failure. |
 | Wrong model identity on verify | `switch_service(...)` again; do not proceed until identity is confirmed. |
+
+### DOM drift repair playbook
+
+1. Run `audit_selectors(service=...)` to identify broken/degraded selectors.
+   If nearly all locators report broken (including `prompt_input`), the page
+   likely hasn't finished rendering — re-run after a few seconds.
+2. Capture evidence: `POST /browser/capture_dom` and `POST /browser/eval` (curl
+   against `http://127.0.0.1:18900`) to inspect the live DOM.
+3. Edit the provider's `dom.py` (`Gemi_Engine_V2/providers/{name}/dom.py`).
+   Insert the new working selector at the **front** of the fallback chain (keep
+   old selectors as fallbacks).
+4. **Important:** `dom.py` is imported at engine process start; `POST /engine/stop`
+   is NOT enough. Kill the `engine_service.py` process and let MCP's
+   `_ensure_service()` respawn it on the next tool call.
+5. Re-run `audit_selectors()` to confirm the fix.
 
 ## 8. Non-negotiable rules
 

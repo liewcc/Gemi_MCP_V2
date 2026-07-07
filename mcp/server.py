@@ -724,6 +724,43 @@ async def get_browser_tabs() -> str:
     return json.dumps(data, indent=2, ensure_ascii=False)
 
 
+# ── 14. Selector Health Audit ─────────────────────────────────────────────
+
+@mcp.tool()
+async def audit_selectors(service: Optional[str] = None) -> str:
+    """Audit every CSS selector in the active provider's DOM class against the live page.
+
+    Call when a browser operation fails with timeout / element-not-found to
+    distinguish provider DOM drift from a transient failure. Also useful as a
+    proactive health check before heavy sessions.
+
+    Result key meanings:
+      - broken: operations using that locator WILL fail; dom.py needs updating.
+      - degraded (hit_index > 0): primary selector dead, fallback works; early
+        warning — not urgent but should be fixed.
+      - state_dependent: element is legitimately absent on an idle page (e.g.
+        stop button, spinner, submit button); not an error. To verify these,
+        re-run the audit while text is present in the input or during generation.
+      - healthy: selector matched on the first candidate — no action needed.
+
+    If nearly ALL locators report broken (including prompt_input), the page has
+    probably not finished rendering or is logged out — take a screenshot or
+    re-run after a few seconds before concluding DOM drift.
+
+    Args:
+        service: Target service ('gemini', 'deepseek', 'copilot', or 'zai').
+                 Omit to audit the currently active one.
+
+    Returns:
+        JSON audit report with counts and details for each status category.
+    """
+    await _ensure_browser()
+    data = await _post("/browser/selector_audit", params={"service": service} if service else None)
+    if data.get("status") == "success":
+        return json.dumps(data.get("data", {}), indent=2)
+    raise RuntimeError(data.get("message", "audit_selectors failed"))
+
+
 # ── Entry Point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
