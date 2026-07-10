@@ -1402,7 +1402,8 @@ function App() {
             cwd: ROOT_DIR,
             detached: true,
             stdio: 'ignore',
-            windowsHide: false
+            windowsHide: false,
+            windowsVerbatimArguments: true
           }).unref();
         } catch (e) {
           // ignore spawn error
