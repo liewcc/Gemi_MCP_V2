@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import https from 'https';
 
 const execAsync = promisify(exec);
 
@@ -23,6 +24,53 @@ let TUI_VERSION;
 try { TUI_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'version.json'), 'utf8')).version; } catch { TUI_VERSION = '?.?.?'; }
 let ENGINE_VERSION;
 try { ENGINE_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, 'version.json'), 'utf8')).version; } catch { ENGINE_VERSION = '?.?.?'; }
+
+function fetchJson(url) {
+  return new Promise((resolve) => {
+    try {
+      const parsed = new URL(url);
+      const options = {
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        headers: {
+          'User-Agent': 'Gemi_MCP_V2'
+        }
+      };
+      https.get(options, (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          resolve(null);
+          return;
+        }
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(body));
+          } catch {
+            resolve(null);
+          }
+        });
+      }).on('error', () => {
+        resolve(null);
+      });
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+function isBehind(localStr, remoteStr) {
+  if (!localStr || !remoteStr) return false;
+  const localParts = localStr.split('.').map(x => parseInt(x, 10) || 0);
+  const remoteParts = remoteStr.split('.').map(x => parseInt(x, 10) || 0);
+  for (let i = 0; i < 3; i++) {
+    const localVal = localParts[i] || 0;
+    const remoteVal = remoteParts[i] || 0;
+    if (remoteVal > localVal) return true;
+    if (remoteVal < localVal) return false;
+  }
+  return false;
+}
 
 if (!fs.existsSync(CONFIG_PATH)) {
   const defaultCfg = {
@@ -675,9 +723,9 @@ const Header = React.memo(function Header({ engineStatus, browserStatus, activeA
   );
 });
 
-const TABS = ['dashboard', 'account', 'health', 'process', 'exit'];
+const TABS = ['dashboard', 'account', 'health', 'process', 'exit', 'update'];
 
-const MenuBar = React.memo(function MenuBar({ activeTab, mode }) {
+const MenuBar = React.memo(function MenuBar({ activeTab, mode, updateAvailable }) {
   const isMenu = mode === 'menu';
   return (
     <Box flexDirection="row" paddingX={1} marginTop={0}>
@@ -719,6 +767,14 @@ const MenuBar = React.memo(function MenuBar({ activeTab, mode }) {
         bold={!isMenu && activeTab === 'exit'}
       >
         {' CLEAN EXIT '}
+      </Text>
+      <Text>  </Text>
+      <Text
+        color={activeTab === 'update' ? (isMenu ? 'black' : 'green') : 'gray'}
+        backgroundColor={isMenu && activeTab === 'update' ? 'green' : undefined}
+        bold={!isMenu && activeTab === 'update'}
+      >
+        {' UPDATE & RELAUNCH '}
       </Text>
       <Text>  </Text>
       {isMenu && <Text dimColor>(← → switch)</Text>}
@@ -1120,15 +1176,26 @@ const LogPanel = React.memo(function LogPanel({ logs, scrollOffset, mode, height
   );
 });
 
-const StatusBar = React.memo(function StatusBar({ message }) {
+const StatusBar = React.memo(function StatusBar({ message, updateInfo }) {
+  const showTuiStatus = updateInfo && updateInfo.tuiRemote !== null;
+  const showEngineStatus = updateInfo && updateInfo.engineRemote !== null;
+
+  const tuiColor = showTuiStatus ? (updateInfo.tuiBehind ? 'red' : 'green') : undefined;
+  const tuiDim = !showTuiStatus;
+
+  const engineColor = showEngineStatus ? (updateInfo.engineBehind ? 'red' : 'green') : undefined;
+  const engineDim = !showEngineStatus;
+
   return (
     <Box borderStyle="single" paddingX={1} justifyContent="space-between">
       <Box flexGrow={1}>
         <Text dimColor>▶ </Text>
         <Text wrap="truncate">{message}</Text>
       </Box>
-      <Box flexShrink={0}>
-        <Text dimColor> TUI v{TUI_VERSION} · Eng v{ENGINE_VERSION}</Text>
+      <Box flexShrink={0} flexDirection="row">
+        <Text color={tuiColor} dimColor={tuiDim}> TUI v{TUI_VERSION}</Text>
+        <Text dimColor> · </Text>
+        <Text color={engineColor} dimColor={engineDim}>Eng v{ENGINE_VERSION}</Text>
       </Box>
     </Box>
   );
@@ -1207,18 +1274,58 @@ function App() {
   const [procMode, setProcMode]                     = useState('view'); // 'view' | 'kill'
   const [killAllConfirmSelected, setKillAllConfirmSelected] = useState(0);
   const [exitConfirmSelected, setExitConfirmSelected] = useState(0);
+  const [updateConfirmSelected, setUpdateConfirmSelected] = useState(0);
+  const [updateInfo, setUpdateInfo]                 = useState({
+    tuiRemote: null,
+    engineRemote: null,
+    tuiBehind: null,
+    engineBehind: null
+  });
+  const updateAvailable = !!(updateInfo && (updateInfo.tuiBehind || updateInfo.engineBehind));
+
   const procActionSelectedRef = useRef(0);
   const procListRef           = useRef([]);
   const procListSelectedRef   = useRef(0);
   const procModeRef           = useRef('view');
   const killAllConfirmSelectedRef = useRef(0);
   const exitConfirmSelectedRef = useRef(0);
+  const updateConfirmSelectedRef = useRef(0);
+  const updateAvailableRef = useRef(false);
+
   useEffect(() => { procActionSelectedRef.current = procActionSelected; }, [procActionSelected]);
   useEffect(() => { procListRef.current = procList; }, [procList]);
   useEffect(() => { procListSelectedRef.current = procListSelected; }, [procListSelected]);
   useEffect(() => { procModeRef.current = procMode; }, [procMode]);
   useEffect(() => { killAllConfirmSelectedRef.current = killAllConfirmSelected; }, [killAllConfirmSelected]);
   useEffect(() => { exitConfirmSelectedRef.current = exitConfirmSelected; }, [exitConfirmSelected]);
+  useEffect(() => { updateConfirmSelectedRef.current = updateConfirmSelected; }, [updateConfirmSelected]);
+  useEffect(() => { updateAvailableRef.current = updateAvailable; }, [updateAvailable]);
+
+  useEffect(() => {
+    async function checkUpdates() {
+      const tuiUrl = 'https://raw.githubusercontent.com/liewcc/Gemi_MCP_V2/master/version.json';
+      const engineUrl = 'https://raw.githubusercontent.com/liewcc/Gemi_Engine_V2/master/version.json';
+      
+      const [tuiRes, engineRes] = await Promise.all([
+        fetchJson(tuiUrl),
+        fetchJson(engineUrl)
+      ]);
+      
+      const tuiRemote = tuiRes?.version || null;
+      const engineRemote = engineRes?.version || null;
+      
+      const tuiBehind = tuiRemote ? isBehind(TUI_VERSION, tuiRemote) : false;
+      const engineBehind = engineRemote ? isBehind(ENGINE_VERSION, engineRemote) : false;
+      
+      setUpdateInfo({
+        tuiRemote,
+        engineRemote,
+        tuiBehind,
+        engineBehind
+      });
+    }
+    checkUpdates();
+  }, []);
 
   const [statusBar, setStatusBar]       = useState('Ready.');
   const [servicePid, setServicePid]     = useState(null);
@@ -1270,6 +1377,40 @@ function App() {
   useEffect(() => { repackConfirmSelectedRef.current = repackConfirmSelected; }, [repackConfirmSelected]);
 
   // ── Actions ──────────────────────────────────────────────────────────────────
+
+  const doUpdateAndRelaunch = useCallback(async () => {
+    setMode('menu');
+    setStatusBar('Updating…');
+    try {
+      await execAsync('git pull', { cwd: ROOT_DIR });
+      await execAsync('git submodule update --remote Gemi_Engine_V2', { cwd: ROOT_DIR });
+    } catch (e) {
+      setStatusBar('Update failed: ' + e.message);
+      setMode('menu');
+      return;
+    }
+
+    try {
+      const pids = await listProjectProcesses();
+      await Promise.all(pids.map(pid => execAsync(`taskkill /PID ${pid} /F /T`).catch(() => {})));
+    } catch (e) {
+      // ignore
+    } finally {
+      engine.stop().catch(() => {}).finally(() => {
+        try {
+          spawn('cmd', ['/c', 'timeout /t 3 /nobreak >nul & start "" run.bat'], {
+            cwd: ROOT_DIR,
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: false
+          }).unref();
+        } catch (e) {
+          // ignore spawn error
+        }
+        exit();
+      });
+    }
+  }, [exit]);
 
   // DOM Debug: capture_dom writes the active tab's full HTML straight to disk
   // (the response never has to fit inside an MCP/LLM context — this is a plain
@@ -1848,6 +1989,8 @@ function App() {
     const procMode = procModeRef.current;
     const killAllConfirmSelected = killAllConfirmSelectedRef.current;
     const exitConfirmSelected = exitConfirmSelectedRef.current;
+    const updateAvailable = updateAvailableRef.current;
+    const updateConfirmSelected = updateConfirmSelectedRef.current;
 
     if (key.ctrl && char === 'c') {
       engine.stop().catch(() => {}).finally(() => exit());
@@ -1915,6 +2058,24 @@ function App() {
               engine.stop().catch(() => {}).finally(() => exit());
             }
           })();
+        } else {
+          setMode('menu');
+        }
+      }
+      return;
+    }
+
+    if (mode === 'update_confirm') {
+      if (key.leftArrow || key.rightArrow) {
+        setUpdateConfirmSelected(s => (s === 0 ? 1 : 0));
+      }
+      if (key.escape || key.tab) {
+        setMode('menu');
+        return;
+      }
+      if (key.return) {
+        if (updateConfirmSelected === 1) {
+          doUpdateAndRelaunch();
         } else {
           setMode('menu');
         }
@@ -1998,6 +2159,13 @@ function App() {
         else if (activeTab === 'exit') {
           setExitConfirmSelected(0);
           setMode('exit_confirm');
+        } else if (activeTab === 'update') {
+          if (!updateAvailable) {
+            setStatusBar('Already up to date — TUI and Engine are on the latest version.');
+          } else {
+            setUpdateConfirmSelected(0);
+            setMode('update_confirm');
+          }
         }
       }
       return;
@@ -2219,7 +2387,7 @@ function App() {
   return (
     <Box flexDirection="column" height={termRows}>
       <Header engineStatus={engineStatus} browserStatus={browserStatus} activeAccount={activeAccount} busy={busy} queueDepth={queueDepth} />
-      <MenuBar activeTab={activeTab} mode={mode} />
+      <MenuBar activeTab={activeTab} mode={mode} updateAvailable={updateAvailable} />
       
       <Box flexGrow={1} height={mainHeight} flexDirection="row">
         {mode === 'exit_confirm' ? (
@@ -2234,6 +2402,19 @@ function App() {
                 "window using the X button in the top-right corner."
               ]}
               selected={exitConfirmSelected}
+            />
+          </Box>
+        ) : mode === 'update_confirm' ? (
+          <Box width={leftPanelWidth + rightPanelWidth} height={mainHeight} alignItems="center" justifyContent="center">
+            <ConfirmModal
+              lines={[
+                `TUI:    v${TUI_VERSION}  ->  v${updateInfo?.tuiRemote || '?.?.?'}${updateInfo?.tuiBehind ? '' : ' (up to date)'}`,
+                `Engine: v${ENGINE_VERSION}  ->  v${updateInfo?.engineRemote || '?.?.?'}${updateInfo?.engineBehind ? '' : ' (up to date)'}`,
+                "",
+                "This will git pull, update the engine submodule, and relaunch the TUI.",
+                "Select OK and press Enter to proceed."
+              ]}
+              selected={updateConfirmSelected}
             />
           </Box>
         ) : activeTab === 'dashboard' ? (
@@ -2318,13 +2499,17 @@ function App() {
           <Box width={leftPanelWidth + rightPanelWidth} height={mainHeight} alignItems="center" justifyContent="center">
             <Text dimColor>Press Enter for Clean Exit (kills all project PIDs)</Text>
           </Box>
+        ) : activeTab === 'update' ? (
+          <Box width={leftPanelWidth + rightPanelWidth} height={mainHeight} alignItems="center" justifyContent="center">
+            <Text dimColor>{updateAvailable ? "Press Enter to Update & Relaunch" : "No updates available (TUI and Engine are up to date)"}</Text>
+          </Box>
         ) : (
           <Box width={leftPanelWidth + rightPanelWidth} height={mainHeight} alignItems="center" justifyContent="center">
             <Text dimColor>Health — not yet implemented</Text>
           </Box>
         )}
       </Box>
-      <StatusBar message={statusBar} />
+      <StatusBar message={statusBar} updateInfo={updateInfo} />
     </Box>
   );
 }
