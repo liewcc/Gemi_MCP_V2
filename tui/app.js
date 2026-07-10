@@ -18,6 +18,12 @@ const ENGINE_PY_HIDDEN   = path.join(ENGINE_DIR, '.venv', 'Scripts', 'pythonw.ex
 const CONFIG_PATH = path.join(ROOT_DIR, 'config.json');
 const DOM_DUMPS_DIR = path.join(ENGINE_DIR, 'dom_dumps');
 
+// Read local version numbers at startup; fall back silently if files are absent.
+let TUI_VERSION;
+try { TUI_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT_DIR, 'version.json'), 'utf8')).version; } catch { TUI_VERSION = '?.?.?'; }
+let ENGINE_VERSION;
+try { ENGINE_VERSION = JSON.parse(fs.readFileSync(path.join(ENGINE_DIR, 'version.json'), 'utf8')).version; } catch { ENGINE_VERSION = '?.?.?'; }
+
 if (!fs.existsSync(CONFIG_PATH)) {
   const defaultCfg = {
     headless: true,
@@ -1116,9 +1122,14 @@ const LogPanel = React.memo(function LogPanel({ logs, scrollOffset, mode, height
 
 const StatusBar = React.memo(function StatusBar({ message }) {
   return (
-    <Box borderStyle="single" paddingX={1}>
-      <Text dimColor>▶ </Text>
-      <Text wrap="truncate">{message}</Text>
+    <Box borderStyle="single" paddingX={1} justifyContent="space-between">
+      <Box flexGrow={1}>
+        <Text dimColor>▶ </Text>
+        <Text wrap="truncate">{message}</Text>
+      </Box>
+      <Box flexShrink={0}>
+        <Text dimColor> TUI v{TUI_VERSION} · Eng v{ENGINE_VERSION}</Text>
+      </Box>
     </Box>
   );
 });
