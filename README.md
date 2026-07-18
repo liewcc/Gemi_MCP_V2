@@ -18,13 +18,24 @@ provide an MCP-based automation layer, with an Ink TUI front end.
 
 ## Setup
 
+`Gemi_Engine_V2/` is a git submodule. Clone with:
+
+```
+git clone --recurse-submodules <this-repo-url>
+```
+
+If you already cloned without that flag, run `git submodule update --init --recursive`
+before (or let) `setup.ps1` do it for you — it also does this automatically as its
+first step.
+
 Double-click `setup.bat` (or run `setup.ps1`) once at the repo root. It:
 
-1. Checks system Python and the VC++ runtime.
-2. Creates `Gemi_Engine_V2/.venv/` and installs the engine deps + Chromium.
-3. Creates the outer `.venv/` and installs the MCP server deps.
-4. Downloads portable Node.js into `.node_venv/`.
-5. Runs `npm install` for the TUI and creates a desktop shortcut.
+1. Initializes the `Gemi_Engine_V2` submodule if needed.
+2. Checks system Python and the VC++ runtime.
+3. Creates `Gemi_Engine_V2/.venv/` and installs the engine deps + Chromium.
+4. Creates the outer `.venv/` and installs the MCP server deps.
+5. Downloads portable Node.js into `.node_venv/`.
+6. Runs `npm install` for the TUI and creates a desktop shortcut.
 
 Re-running skips any step whose output already exists.
 

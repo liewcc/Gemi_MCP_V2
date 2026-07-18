@@ -7,6 +7,17 @@ Write-Host "============================================================" -Foreg
 Write-Host "  Gemi MCP V2 -- Setup" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
+# ── 0. Git submodule (Gemi_Engine_V2) ─────────────────────────
+Write-Host "`n[0/6] Checking Gemi_Engine_V2 submodule..." -ForegroundColor Yellow
+if (Test-Path (Join-Path $workDir ".git")) {
+    & git submodule update --init --recursive
+}
+if (-not (Test-Path "Gemi_Engine_V2\requirements.txt")) {
+    Write-Error "Gemi_Engine_V2 is empty. Clone with 'git clone --recurse-submodules ...', or run 'git submodule update --init --recursive' in an existing clone."
+    Read-Host "Press Enter to exit"; exit 1
+}
+Write-Host "  OK." -ForegroundColor Green
+
 # ── 1. Check Python ───────────────────────────────────────────
 Write-Host "`n[1/6] Checking Python..." -ForegroundColor Yellow
 try {
