@@ -1238,11 +1238,19 @@ function App() {
   const [profiles, setProfiles]         = useState([]);
   const [pendingAction, setPendingAction] = useState(null);
   const refreshProfiles = useCallback(async () => {
+    // Return prev when the profile list is unchanged (same dir/email/name in the
+    // same order) so React bails out instead of re-rendering — the 5s poll would
+    // otherwise hand back a fresh array every tick and trigger Ink's full-screen
+    // redraw (the right-corner flicker), most visible on the Account tab's
+    // reverse-video table.
+    const same = (a, b) => a.length === b.length &&
+      a.every((p, i) => p.dir === b[i].dir && p.email === b[i].email && p.name === b[i].name);
     try {
-      setProfiles(await engine.getProfiles());
+      const next = await engine.getProfiles();
+      setProfiles(prev => same(prev, next) ? prev : next);
     } catch (e) {
       // Engine offline — read the same data locally from Local State
-      try { setProfiles(localGetProfiles()); } catch (e2) {}
+      try { const next = localGetProfiles(); setProfiles(prev => same(prev, next) ? prev : next); } catch (e2) {}
     }
   }, []);
   const [selected, setSelected]         = useState(0);
@@ -1845,7 +1853,12 @@ function App() {
         setEngineStatus(h.service_pid ? 'online' : 'offline');
         setBrowserStatus(bPids.length > 0 ? 'online' : 'offline');
         setServicePid(h.service_pid ?? null); servicePidRef.current = h.service_pid ?? null;
-        setBrowserPids(bPids); browserPidsRef.current = bPids;
+        // Return the previous array when the PID set is unchanged so React can
+        // bail out — a fresh array reference every tick forces Ink's full-screen
+        // clear+redraw (flicker), even though nothing on screen changed.
+        setBrowserPids(prev =>
+          (prev.length === bPids.length && prev.every((v, i) => v === bPids[i])) ? prev : bPids);
+        browserPidsRef.current = bPids;
         setBusy(h.busy ?? false);
         setQueueDepth(h.queue_depth ?? 0);
         // Re-register on every tick, not just on mount — a fresh engine

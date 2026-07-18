@@ -25,6 +25,39 @@ if (-not (Test-Path $engineVenv)) {
 }
 & "$engineVenv\Scripts\python.exe" -m pip install -r "Gemi_Engine_V2\requirements.txt" --quiet
 if ($LASTEXITCODE -ne 0) { Write-Error "pip install (engine) failed"; Read-Host; exit 1 }
+
+# VC++ Runtime check -- after pip install so msvc-runtime's DLLs are already in the venv,
+# and before playwright install which imports greenlet (needs msvcp140.dll).
+if (Test-Path "$engineVenv\Scripts\msvcp140.dll") {
+    Write-Host "  VC++ Runtime present (venv, portable)." -ForegroundColor Green
+} elseif (Test-Path "$env:WINDIR\System32\msvcp140.dll") {
+    Write-Host "  VC++ Runtime present (system)." -ForegroundColor Green
+} else {
+    Write-Host "  msvcp140.dll missing, installing VCRedist via winget..." -ForegroundColor Yellow
+    winget install --id Microsoft.VCRedist.2015+.x64 -e --accept-source-agreements --accept-package-agreements
+    if (-not (Test-Path "$env:WINDIR\System32\msvcp140.dll")) {
+        Write-Warning "  VCRedist install could not be confirmed. If startup fails with a greenlet DLL error, install 'Microsoft Visual C++ 2015-2022 Redistributable (x64)' manually."
+    }
+}
+
+# Portable Playwright browsers -- keep Chromium inside the project folder.
+# Must be an ABSOLUTE path (relative paths resolve against process CWD).
+$pwBrowsers = Join-Path $workDir "Gemi_Engine_V2\ms-playwright"
+$env:PLAYWRIGHT_BROWSERS_PATH = $pwBrowsers
+
+# One-time migration: reuse browsers already downloaded to %LOCALAPPDATA% (~250MB)
+# and clean the old C-drive directory in the same move.
+$oldPwBrowsers = Join-Path $env:LOCALAPPDATA "ms-playwright"
+if ((Test-Path $oldPwBrowsers) -and (-not (Test-Path $pwBrowsers))) {
+    Write-Host "  Migrating existing browsers from $oldPwBrowsers ..." -ForegroundColor Yellow
+    try {
+        Move-Item -Path $oldPwBrowsers -Destination $pwBrowsers -Force -ErrorAction Stop
+        Write-Host "  Migration done." -ForegroundColor Green
+    } catch {
+        Write-Warning "  Migration failed ($_). A fresh copy will be downloaded instead."
+    }
+}
+
 & "$engineVenv\Scripts\python.exe" -m playwright install chromium
 if ($LASTEXITCODE -ne 0) { Write-Error "playwright install failed"; Read-Host; exit 1 }
 Write-Host "  Done." -ForegroundColor Green

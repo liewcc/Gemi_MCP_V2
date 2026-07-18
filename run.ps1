@@ -70,6 +70,10 @@ function Test-Engine {
 
 $engineDir = Join-Path $root "Gemi_Engine_V2"
 $enginePy  = Join-Path $engineDir ".venv\Scripts\python.exe"
+
+# Portable Playwright browsers -- must be an absolute path (see setup.ps1).
+$env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $engineDir "ms-playwright"
+
 $engineProc = $null   # track PID only if we launched it
 
 if (Test-Engine) {

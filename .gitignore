@@ -26,3 +26,6 @@ MODULARIZATION_PLAN.md
 
 # Local agent reference (not for remote)
 DOM_SELF_HEALING.md
+
+# Portable Playwright browsers (binary, re-created by setup.ps1)
+Gemi_Engine_V2/ms-playwright/
