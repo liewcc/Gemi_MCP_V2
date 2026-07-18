@@ -288,33 +288,25 @@ async def apply_settings(
 async def attach_files(file_paths: list[str]) -> str:
     """Attach one or more local files to the current prompt input.
 
-    Syncs the attachment list: adds missing files, keeps existing ones,
-    removes extras. Pass an empty list [] to clear all attachments.
+    Always clears and re-uploads every listed file, which guarantees that files
+    replaced on disk under the same name are uploaded fresh. Pass an empty
+    list [] to clear all attachments.
 
     Args:
         file_paths: Absolute local paths to the files to attach.
 
     Returns:
-        Summary: how many were added / removed.
+        Summary: how many were uploaded.
     """
     await _ensure_browser()
-    # Sync via add/remove loop — engine exposes atomic add and remove endpoints
-    current_data = await _get("/browser/current_attachments")
-    current = set(current_data.get("attachments", []))
-    target = set(file_paths)
-
-    added, removed = 0, 0
-    for path in target - current:
+    # ponytail: always clear+reupload — stem-based skip in the engine hides same-name content changes; O(n) re-upload is the price of freshness
+    await _post("/browser/clear_attachments")
+    for path in file_paths:
         await _post("/browser/file/add", {"path": path})
-        added += 1
-    for path in current - target:
-        await _post("/browser/file/remove", {"path": path})
-        removed += 1
 
-    return (
-        f"Attachments synced: +{added} added, -{removed} removed, "
-        f"{len(target)} total."
-    )
+    if not file_paths:
+        return "Attachments reset: 0 file(s) uploaded fresh (cleared only)."
+    return f"Attachments reset: {len(file_paths)} file(s) uploaded fresh."
 
 
 @mcp.tool()
