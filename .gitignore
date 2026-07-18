@@ -19,6 +19,8 @@ Gemi_Engine_V2/dom_dumps/
 
 # Internal session notes, not for the public repo
 HANDOFF.md
+HANDOFF_SESSION_*.md
+Implementation Plan.md
 API_REFERENCE.md
 ARCHITECTURE.md
 MCP_TOOLS_REFERENCE.md
