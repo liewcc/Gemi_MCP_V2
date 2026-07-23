@@ -38,17 +38,35 @@ _service_start_lock = asyncio.Lock()
 
 # ── HTTP helpers ───────────────────────────────────────────────────────────────
 
+def _raise_for_status(resp: httpx.Response) -> None:
+    """Fail with the engine's own reason, not just a status code.
+
+    An endpoint that raises comes back as FastAPI's {"detail": ...}, but
+    httpx's raise_for_status reports only "Server error '500 ...' for url",
+    dropping the body — the one part that says what actually went wrong.
+    """
+    if resp.status_code < 400:
+        return
+    try:
+        detail = resp.json().get("detail")
+    except Exception:
+        detail = None
+    if detail:
+        raise RuntimeError(f"{resp.request.url.path} failed: {detail}")
+    resp.raise_for_status()
+
+
 async def _post(path: str, payload=None, params: dict | None = None, timeout: float = 300.0) -> dict:
     async with httpx.AsyncClient() as client:
         resp = await client.post(f"{ENGINE_URL}{path}", json=payload, params=params, timeout=timeout)
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
 
 async def _get(path: str, params: dict | None = None, timeout: float = 30.0) -> dict:
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"{ENGINE_URL}{path}", params=params, timeout=timeout)
-        resp.raise_for_status()
+        _raise_for_status(resp)
         return resp.json()
 
 
